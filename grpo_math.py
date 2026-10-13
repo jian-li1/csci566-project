@@ -40,6 +40,15 @@ DEFAULT_LR = 2e-5
 # Pin RL sampling/KL; TRL defaults have changed between versions.
 BETA = 0.001  # KL coefficient vs reference policy
 TEMPERATURE = 1.0
+WARMUP_RATIO = 0.03
+
+# Qwen3.5 is loaded as a text-only causal LM by Transformers, while vLLM uses
+# the checkpoint's multimodal wrapper and therefore expects different prefixes.
+QWEN35_MODEL_TYPES = ("qwen3_5", "qwen3_5_text")
+QWEN35_VLLM_PREFIX_MAP = (
+    ("lm_head.", "language_model.lm_head."),
+    ("model.", "language_model.model."),
+)
 
 # Columns the binary correctness reward reads from the train dataset.
 REQUIRED_COLUMNS = ("prompt", "problem", "solution")
@@ -153,8 +162,16 @@ def _load_local_dataset(path: Path, split: str) -> Dataset:
     suffix = path.suffix.lower()
     if suffix == ".parquet":
         return load_dataset("parquet", data_files=str(path), split="train")
-    if suffix in {".jsonl", ".json"}:
-        return load_dataset("json", data_files=str(path), split="train")
+    if suffix == ".jsonl":
+        with path.open("r", encoding="utf-8") as dataset_file:
+            records = [json.loads(line) for line in dataset_file if line.strip()]
+        return Dataset.from_list(records)
+    if suffix == ".json":
+        with path.open("r", encoding="utf-8") as dataset_file:
+            records = json.load(dataset_file)
+        if isinstance(records, dict):
+            records = [records]
+        return Dataset.from_list(records)
     raise ValueError(
         f"Unsupported local file type '{suffix}'. Use .parquet, .json, or .jsonl."
     )
@@ -339,10 +356,37 @@ def load_model(model_id: str, init_adapter: str | None):
     return model
 
 
+def patch_qwen35_vllm_weight_sync(trainer: GRPOTrainer, model: PeftModel) -> bool:
+    """Map text-only Qwen3.5 weight names to vLLM's multimodal wrapper."""
+    vllm_generation = getattr(trainer, "vllm_generation", None)
+    model_type = getattr(model.get_base_model().config, "model_type", None)
+    if vllm_generation is None or model_type not in QWEN35_MODEL_TYPES:
+        return False
+
+    original_fix = vllm_generation._fix_param_name_to_vllm
+
+    def fix_param_name(name: str, extra_prefixes: list[str] | None = None) -> str:
+        name = original_fix(name, extra_prefixes)
+        for prefix, replacement in QWEN35_VLLM_PREFIX_MAP:
+            if name.startswith(prefix):
+                return name.replace(prefix, replacement, 1)
+        return name
+
+    vllm_generation._fix_param_name_to_vllm = fix_param_name
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main — wire data, model, config, trainer; run GRPO
 # ---------------------------------------------------------------------------
 def main() -> None:
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "CUDA is required for GRPO training, but PyTorch cannot see a GPU. "
+            "Run this command inside a GPU-enabled allocation."
+        )
+    print(f"Training device: cuda:0 ({torch.cuda.get_device_name(0)})")
+
     args = parse_args()
 
     if not MATH_VERIFY_AVAILABLE:
@@ -399,11 +443,10 @@ def main() -> None:
         per_device_train_batch_size=MICRO_BATCH_COMPLETIONS,  # 8
         gradient_accumulation_steps=GRAD_ACCUM_STEPS,  # 8 → 64 / step
         num_generations=args.G,  # only ablation knob in the batch math
-        max_prompt_length=1024,
         max_completion_length=1024,  # room for <think>…<answer>
         optim="adamw_8bit",
         max_steps=args.max_steps,  # matched compute; not num_train_epochs
-        warmup_ratio=0.03,  # short warmup; LR still decays linearly to 0 by default
+        warmup_steps=max(1, round(WARMUP_RATIO * args.max_steps)),
         bf16=True,
         beta=BETA,
         temperature=TEMPERATURE,
@@ -419,7 +462,8 @@ def main() -> None:
         remove_unused_columns=False,  # keep problem/solution for the reward fn
         use_vllm=not args.no_vllm,
         vllm_mode="colocate",  # vLLM shares the training GPU
-        vllm_gpu_memory_utilization=0.3,  # leave headroom for the train model
+        vllm_gpu_memory_utilization=0.5,  # leave headroom for the train model
+        vllm_max_model_length=2048,
         run_name=run_name,
     )
 
@@ -434,6 +478,9 @@ def main() -> None:
         processing_class=tokenizer,
         callbacks=[token_cb],
     )
+
+    if patch_qwen35_vllm_weight_sync(trainer, model):
+        print("Enabled Qwen3.5 Hugging Face → vLLM weight-name compatibility mapping.")
 
     trainer.train()
     trainer.save_model(output_dir)
