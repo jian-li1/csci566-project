@@ -1,0 +1,73 @@
+import argparse
+from torch.utils.data import Subset
+#from kaggle_dataloader import KaggleDataLoader
+from custom_dataset_loader import custom_dataset_loader
+from gemma import GemmaModel
+from training_loops import TrainingLoops
+from hf_math_loader import MathDataset
+
+MODEL_ID = "google/gemma-4-E2B-it"
+PATH = "/Users/johntsoi/.cache/kagglehub/datasets/alpie/mathreasoning/versions/1"
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--f", type=bool, default=True)     # Set this to false when want smaller subset
+    parser.add_argument('--samples', type=int, default=500) # sample size of dataset
+    parser.add_argument('--verbose', action='store_true')   # Verbose printing
+    parser.add_argument('--ep', type=int, default=5)        # epochs
+    parser.add_argument('--lr', type=float, default=0.0001) # learning rate
+    parser.add_argument('--gstep', type=int, default=2)     # gradient accumulate steps
+    parser.add_argument('--bsize', type=int, default=1)     # batch sizes
+    parser.add_argument('--tp', type=float, default=0.8)    # training %
+    parser.add_argument('--vp', type=float, default=0.2)    # validation %
+    parser.add_argument('--outdir', type=str, default="./checkpoints") # checkpoint dir
+    args = parser.parse_args()
+
+    # dataset = KaggleDataLoader(PATH)
+    dataset = MathDataset()
+    # Custom dataset loader take the name of the jsonl file: eg: train, val, test
+    train_dataset =custom_dataset_loader("train")
+    val_dataset = custom_dataset_loader("val")
+    model = GemmaModel(MODEL_ID)
+    print(f"Lenght of the dataset: {len(dataset)}")
+    if args.f == False:
+        dataset = Subset(
+            dataset,
+            range(
+                min(args.samples, len(dataset))
+            )
+        )
+
+        train_dataset = Subset(
+            dataset,
+            range(
+                min(args.samples, len(train_dataset))
+            )
+        )
+
+        val_dataset = Subset(
+            dataset,
+            range(
+                min(args.samples, len(val_dataset))
+            )
+        )
+
+    training = TrainingLoops(
+        model=model,
+        dataset=dataset,
+        training_portion=args.tp,
+        validation_portion=args.vp,
+        batch_size=args.bsize,
+        gradient_accumulation_steps=args.gstep,
+        epochs=args.ep,
+        lr=args.lr,
+        output_dir=args.outdir,
+        trainset= train_dataset,
+        valset= val_dataset,
+    )
+    training.train()
+
+
+if __name__ == "__main__":
+    main()
