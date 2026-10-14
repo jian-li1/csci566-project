@@ -1,61 +1,108 @@
+"""Gemma SFT runner: automatic train/validation split or supplied train/val JSONL pair.
+
+Validation is always required. Full dataset is used by default.
+"""
+
 import argparse
 from torch.utils.data import Subset
-#from kaggle_dataloader import KaggleDataLoader
+
 from custom_dataset_loader import custom_dataset_loader
 from gemma import GemmaModel
 from training_loops import TrainingLoops
-from hf_math_loader import MathDataset
 
 MODEL_ID = "google/gemma-4-E2B-it"
-PATH = "/Users/johntsoi/.cache/kagglehub/datasets/alpie/mathreasoning/versions/1"
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--f", type=bool, default=True)     # Set this to false when want smaller subset
-    parser.add_argument('--samples', type=int, default=500) # sample size of dataset
-    parser.add_argument('--verbose', action='store_true')   # Verbose printing
-    parser.add_argument('--ep', type=int, default=5)        # epochs
-    parser.add_argument('--lr', type=float, default=0.0001) # learning rate
-    parser.add_argument('--gstep', type=int, default=2)     # gradient accumulate steps
-    parser.add_argument('--bsize', type=int, default=1)     # batch sizes
-    parser.add_argument('--tp', type=float, default=0.8)    # training %
-    parser.add_argument('--vp', type=float, default=0.2)    # validation %
-    parser.add_argument('--outdir', type=str, default="./checkpoints") # checkpoint dir
+    parser = argparse.ArgumentParser(description="Train Gemma with required validation")
+    parser.add_argument("--source", choices=["custom", "hf"], default="custom")
+
+    # Option A: one JSONL file; the runner splits it into train and val.
+    parser.add_argument("--dataset-file", default=None,
+                        help="One JSONL file to split into train and validation")
+
+    # Option B: both explicit train and val files must be supplied together.
+    parser.add_argument("--train-file", default=None, help="Pre-split training JSONL file")
+    parser.add_argument("--val-file", default=None, help="Pre-split validation JSONL file")
+
+    parser.add_argument("--qcol", default="problem", help="Source question column")
+    parser.add_argument("--acol", default="solution", help="Source answer column")
+    parser.add_argument("--samples", type=int, default=None,
+                        help="Optional debugging cap; default None uses every row")
+    parser.add_argument("--ep", type=int, default=5)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--gstep", type=int, default=2)
+    parser.add_argument("--bsize", type=int, default=1)
+    parser.add_argument("--tp", type=float, default=0.8)
+    parser.add_argument("--vp", type=float, default=0.2)
+    parser.add_argument("--outdir", default="./checkpoints")
     args = parser.parse_args()
 
-    # dataset = KaggleDataLoader(PATH)
-    dataset = MathDataset()
-    # Custom dataset loader take the name of the jsonl file: eg: train, val, test
-    train_dataset =custom_dataset_loader("train")
-    val_dataset = custom_dataset_loader("val")
+    if args.samples is not None and args.samples <= 0:
+        parser.error("--samples must be positive")
+    if args.bsize <= 0 or args.gstep <= 0 or args.ep <= 0:
+        parser.error("--bsize, --gstep, and --ep must all be positive")
+    if args.lr <= 0:
+        parser.error("--lr must be positive")
+
+    if args.source == "custom":
+        single_file = args.dataset_file is not None
+        paired_files = args.train_file is not None or args.val_file is not None
+        if single_file == paired_files:
+            parser.error(
+                "For --source custom, choose exactly one: "
+                "--dataset-file FILE (auto split), OR "
+                "--train-file TRAIN --val-file VAL (provided split)."
+            )
+        if paired_files and not (args.train_file and args.val_file):
+            parser.error("--train-file and --val-file are BOTH required for a provided split")
+    else:
+        if args.dataset_file or args.train_file or args.val_file:
+            parser.error("For --source hf, do not supply any JSONL file arguments")
+
+    # Auto-split always needs a valid train/validation ratio.
+    auto_split = args.source == "hf" or args.dataset_file is not None
+    if auto_split and not (0 < args.tp < 1 and 0 < args.vp < 1
+                           and abs(args.tp + args.vp - 1.0) <= 1e-6):
+        parser.error("For automatic splitting, --tp and --vp must be positive and sum to 1")
+
+    dataset = None
+    trainset = None
+    valset = None
+
+    if args.source == "hf":
+        from hf_math_loader import MathDataset
+        print("Loading full Hugging Face math dataset for automatic splitting")
+        dataset = MathDataset()
+    elif args.dataset_file is not None:
+        print(f"Loading full JSONL dataset for automatic splitting: {args.dataset_file}")
+        dataset = custom_dataset_loader(args.dataset_file, args.qcol, args.acol)
+    else:
+        print(f"Loading training file: {args.train_file}")
+        print(f"Loading validation file: {args.val_file}")
+        trainset = custom_dataset_loader(args.train_file, args.qcol, args.acol)
+        valset = custom_dataset_loader(args.val_file, args.qcol, args.acol)
+
+    # No cap by default. If debugging, cap only training candidates, not
+    # the separately supplied validation dataset.
+    if args.samples is not None:
+        if dataset is not None:
+            dataset = Subset(dataset, range(min(args.samples, len(dataset))))
+        else:
+            trainset = Subset(trainset, range(min(args.samples, len(trainset))))
+        print("WARNING: Debugging subset enabled: not using the full training dataset")
+
+    if dataset is not None:
+        print(f"Automatic split input: {len(dataset)} records")
+    else:
+        print(f"Provided split: train={len(trainset)}, val={len(valset)} records")
+
     model = GemmaModel(MODEL_ID)
-    print(f"Lenght of the dataset: {len(dataset)}")
-    if args.f == False:
-        dataset = Subset(
-            dataset,
-            range(
-                min(args.samples, len(dataset))
-            )
-        )
-
-        train_dataset = Subset(
-            dataset,
-            range(
-                min(args.samples, len(train_dataset))
-            )
-        )
-
-        val_dataset = Subset(
-            dataset,
-            range(
-                min(args.samples, len(val_dataset))
-            )
-        )
-
     training = TrainingLoops(
         model=model,
         dataset=dataset,
+        trainset=trainset,
+        valset=valset,
         training_portion=args.tp,
         validation_portion=args.vp,
         batch_size=args.bsize,
@@ -63,8 +110,6 @@ def main():
         epochs=args.ep,
         lr=args.lr,
         output_dir=args.outdir,
-        trainset= train_dataset,
-        valset= val_dataset,
     )
     training.train()
 

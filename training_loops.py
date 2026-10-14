@@ -1,70 +1,90 @@
 import math
 import os
+
 import torch
-from torch.utils.data import DataLoader, random_split, Dataset
+from torch.utils.data import DataLoader, random_split
 from transformers import get_linear_schedule_with_warmup
 
 
 class TrainingLoops:
-    def __init__(self, model,
-                 dataset,
-                 training_portion=0.8, validation_portion=0.2,
-                 batch_size=4,
-                 epochs=20,
-                 lr=1e-4,
-                 gradient_accumulation_steps=4,
-                 output_dir="./checkpoints",
-                 trainset = None,
-                 valset = None
-                 ):
-
+    def __init__(
+        self,
+        model,
+        dataset=None,
+        training_portion=0.8,
+        validation_portion=0.2,
+        batch_size=4,
+        epochs=20,
+        lr=1e-4,
+        gradient_accumulation_steps=4,
+        output_dir="./checkpoints",
+        trainset=None,
+        valset=None,
+    ):
         self.model = model
-        self.dataset = dataset
         self.batch_size = batch_size
         self.epochs = epochs
         self.lr = lr
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
-        if trainset and valset:
-            #use custom dataset
+
+        # Exactly one source: either a whole dataset to split, or a train/val pair.
+        if dataset is not None and (trainset is not None or valset is not None):
+            raise ValueError("Provide a whole dataset OR a trainset/valset pair, not both")
+        if trainset is not None or valset is not None:
+            if trainset is None or valset is None:
+                raise ValueError("Both trainset and valset are required")
+            if len(trainset) == 0 or len(valset) == 0:
+                raise ValueError("Train and validation datasets must both be nonempty")
             self.train_set = trainset
             self.validation_set = valset
-        else:
-            # Train/validation split
+            self.total_dataset_size = len(trainset) + len(valset)
+        elif dataset is not None:
+            # One dataset, with a deterministic train/validation split.
+            if len(dataset) < 2:
+                raise ValueError("Need at least 2 examples to create train and validation sets")
+            if not (0 < training_portion < 1 and 0 < validation_portion < 1):
+                raise ValueError("Train/validation fractions must each be between 0 and 1")
+            if not math.isclose(training_portion + validation_portion, 1.0, abs_tol=1e-6):
+                raise ValueError("Train and validation fractions must sum to 1")
+            # Integer split ensures both splits are nonempty, even for small datasets.
+            train_count = max(1, min(len(dataset) - 1, int(len(dataset) * training_portion)))
+            val_count = len(dataset) - train_count
             self.train_set, self.validation_set = random_split(
-                dataset,
-                [training_portion, validation_portion],
-                generator=torch.Generator().manual_seed(42)
-                # Ensure we get the same train/validation split every time the program runs
+                dataset, [train_count, val_count], generator=torch.Generator().manual_seed(42)
             )
-        # DataLoader setup
-        self.train_loader = DataLoader(self.train_set, self.batch_size, shuffle=True)
-        self.validation_loader = DataLoader(self.validation_set, self.batch_size, shuffle=False)
+            self.total_dataset_size = len(dataset)
+        else:
+            raise ValueError("Provide either dataset or trainset")
 
-        # Optimizer setup
-        trainable_parameters = [
-            parameter
-            for parameter
-            in self.model.model.parameters()
-            if parameter.requires_grad
-        ]
+        if len(self.train_set) == 0:
+            raise ValueError("Training dataset is empty")
+        self.dataset = self.train_set  # For sample_train() compatibility.
+        self.train_loader = DataLoader(self.train_set, batch_size=self.batch_size, shuffle=True)
+        # Validation is mandatory, so always create its DataLoader.
+        self.validation_loader = DataLoader(
+            self.validation_set, batch_size=self.batch_size, shuffle=False
+        )
+
+        trainable_parameters = [p for p in self.model.model.parameters() if p.requires_grad]
+        if not trainable_parameters:
+            raise ValueError("No trainable parameters; check the LoRA/model configuration")
         self.optimizer = torch.optim.AdamW(trainable_parameters, lr=self.lr)
 
-        # Scheduler setup
         updates_per_epoch = math.ceil(len(self.train_loader) / self.gradient_accumulation_steps)
-        total_updates = (updates_per_epoch * self.epochs)
+        total_updates = updates_per_epoch * self.epochs
         warmup_steps = int(0.03 * total_updates)
-        self.scheduler = (
-            get_linear_schedule_with_warmup(
-                self.optimizer,
-                num_warmup_steps=warmup_steps,
-                num_training_steps=total_updates
-            )
+        self.scheduler = get_linear_schedule_with_warmup(
+            self.optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=total_updates,
         )
         self.global_step = 0
+        self._last_saved_step = -1
+
         print("\n===== Training Configuration =====")
-        print(f"Total dataset size:       {len(self.dataset)}")
+        print(f"Total dataset size:       {self.total_dataset_size}")
         print(f"Training samples:         {len(self.train_set)}")
         print(f"Validation samples:       {len(self.validation_set)}")
         print(f"Batch size:               {self.batch_size}")
@@ -79,21 +99,16 @@ class TrainingLoops:
         print("==================================\n")
 
     def sample_train(self):
-        sample = self.dataset[0]
+        sample = self.train_set[0]
         for epoch in range(2):
             total_loss = 0.0
             for i in range(20):
-                loss = self.model.train_step(
-                    sample["question"],
-                    sample["answer"]
-                )
-                total_loss += loss
-                print(f"Sample: Step {i + 1}: {loss:.4f}")
-            average_loss = total_loss / 20
-            print(f"Sample: Average loss:{average_loss}")
+                loss = self.model.train_step(sample["question"], sample["answer"])
+                total_loss += float(loss)
+                print(f"Sample: Step {i + 1}: {float(loss):.4f}")
+            print(f"Sample: Average loss: {total_loss / 20:.4f}")
 
     def validate(self):
-
         print("\nRunning validation...")
         self.model.model.eval()
         total_loss = 0.0
@@ -103,97 +118,56 @@ class TrainingLoops:
                 questions = batch["question"]
                 answers = batch["answer"]
                 loss = self.model.calculate_batch_loss(questions, answers)
-
-                batch_size = len(questions)
-
-                total_loss += loss.item() * batch_size
-
-                total_samples += batch_size
-        average_loss = (
-                total_loss
-                / total_samples
-        )
-        return average_loss
+                count = len(questions)
+                total_loss += loss.item() * count
+                total_samples += count
+        return total_loss / total_samples
 
     def train(self):
         for epoch in range(self.epochs):
-            print(f"\n{'=' * 50}")
-            print(f"Starting Epoch {epoch + 1}/{self.epochs}")
-            print(f"{'=' * 50}")
-            self.model.model.train()  # Set to Training mode
-            self.optimizer.zero_grad()  # Reset Gradient
+            print(f"\n{'=' * 50}\nStarting Epoch {epoch + 1}/{self.epochs}\n{'=' * 50}")
+            self.model.model.train()
+            self.optimizer.zero_grad(set_to_none=True)
             total_loss = 0.0
             total_examples = 0
 
             for batch_idx, batch in enumerate(self.train_loader):
-                print(
-                    f"[Epoch {epoch + 1}/{self.epochs}] "
-                    f"Batch {batch_idx + 1}/{len(self.train_loader)}"
-                )
+                print(f"[Epoch {epoch + 1}/{self.epochs}] Batch {batch_idx + 1}/{len(self.train_loader)}")
                 questions = batch["question"]
                 answers = batch["answer"]
-
-                # Forward Pass
                 loss = self.model.calculate_batch_loss(questions, answers)
                 print(f"  Raw batch loss: {loss.item():.4f}")
-                batch_size = len(questions)
-                total_loss += (
-                        loss.item()
-                        * batch_size
-                )
-                total_examples += batch_size
+                current_batch_size = len(questions)
+                total_loss += loss.item() * current_batch_size
+                total_examples += current_batch_size
 
-                scaled_loss = loss / self.gradient_accumulation_steps
-
+                # Scale by actual example count in this accumulation window;
+                # this also handles the partial window at the end of an epoch.
+                group_start_batch = (batch_idx // self.gradient_accumulation_steps) * self.gradient_accumulation_steps
+                remaining_examples = len(self.train_set) - group_start_batch * self.batch_size
+                window_examples = min(self.gradient_accumulation_steps * self.batch_size, remaining_examples)
+                scaled_loss = loss * (current_batch_size / window_examples)
                 scaled_loss.backward()
 
-                # Update every 4 batch
                 should_update = (batch_idx + 1) % self.gradient_accumulation_steps == 0
-                # Last batch gradient should also be considered
-                is_last_batch = batch_idx + 1 == len(self.train_loader)
-
-                # Last batch handling
+                is_last_batch = (batch_idx + 1) == len(self.train_loader)
                 if should_update or is_last_batch:
                     print("  -> Optimizer update")
-                    torch.nn.utils.clip_grad_norm_(
-                        self.model.model.parameters(),
-                        max_norm=1.0
-                    )
+                    torch.nn.utils.clip_grad_norm_(self.model.model.parameters(), max_norm=1.0)
                     self.optimizer.step()
-
                     self.scheduler.step()
-
-                    self.optimizer.zero_grad(
-                        set_to_none=True
-                    )
-
+                    self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
 
                     current_lr = self.scheduler.get_last_lr()[0]
-
-                    print(
-                        f"  -> Global step: {self.global_step} "
-                        f"| LR: {current_lr:.8f}"
-                    )
-
+                    print(f"  -> Global step: {self.global_step} | LR: {current_lr:.8f}")
                     if self.global_step % 10 == 0:
-                        print(
-                            f"Epoch "
-                            f"{epoch + 1}/{self.epochs} "
-                            f"| Step "
-                            f"{self.global_step} "
-                            f"| Loss "
-                            f"{loss.item():.4f}"
-                        )
-
-                    # --------------------------
-                    # Checkpoint
-                    # --------------------------
-
+                        print(f"Epoch {epoch + 1}/{self.epochs} | Step {self.global_step} | Loss {loss.item():.4f}")
                     if self.global_step % 50 == 0:
                         self.save_checkpoint(epoch)
                 else:
                     print("  -> Accumulating gradients")
+
             average_train_loss = total_loss / total_examples
             validation_loss = self.validate()
             print("\n" + "=" * 50)
@@ -205,53 +179,18 @@ class TrainingLoops:
             self.save_checkpoint(epoch)
 
     def save_checkpoint(self, epoch):
-
-        checkpoint_dir = os.path.join(
-            self.output_dir,
-            f"checkpoint-{self.global_step}"
-        )
-
-        os.makedirs(
-            checkpoint_dir,
-            exist_ok=True
-        )
-
+        if self._last_saved_step == self.global_step:
+            return
+        checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{self.global_step}")
+        os.makedirs(checkpoint_dir, exist_ok=True)
         self.model.model.save_pretrained(checkpoint_dir)
-
-        # ---------------------------------
-        # Save processor/tokenizer
-        # ---------------------------------
-
         self.model.processor.save_pretrained(checkpoint_dir)
-
-        # ---------------------------------
-        # Save training state
-        # ---------------------------------
-
         training_state = {
             "epoch": epoch,
             "global_step": self.global_step,
-            "optimizer_state_dict":
-                self.optimizer.state_dict(),
-            "scheduler_state_dict":
-                self.scheduler.state_dict()
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
         }
-
-        torch.save(
-            training_state,
-            os.path.join(
-                checkpoint_dir,
-                "training_state.pt"
-            )
-        )
-
-        print(
-            f"Checkpoint saved at: "
-            f"{checkpoint_dir}"
-        )
-
-
-
-
-
-
+        torch.save(training_state, os.path.join(checkpoint_dir, "training_state.pt"))
+        self._last_saved_step = self.global_step
+        print(f"Checkpoint saved at: {checkpoint_dir}")
