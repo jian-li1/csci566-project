@@ -136,7 +136,9 @@ class ReasoningGymEnv:
         return self.load_problem(self.dataset[int(index)])
 
     def score_answer(self, answer: str) -> float:
-        ...
+        if self.entry is None:
+            raise RuntimeError("score_answer called before reset/load_problem")
+        return float(self._score_fn(answer, self.entry))
 
     def step(self, response: str) -> dict[str, Any]:
         ...
