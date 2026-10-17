@@ -76,7 +76,36 @@ class ReasoningGymEnv:
         )
 
     def load_problem(self, entry: dict[str, Any]) -> dict[str, Any]:
-        ...
+        if not isinstance(entry, dict):
+            raise TypeError(f"entry must be a dict, got {type(entry)}")
+
+        question = entry.get("question")
+        if not isinstance(question, str) or not question.strip():
+            raise ValueError("entry['question'] must be a non-empty string")
+        if "answer" not in entry:
+            raise ValueError("entry must include an 'answer' field for scoring")
+
+        metadata = entry.get("metadata")
+        if metadata is not None and not isinstance(metadata, dict):
+            raise TypeError("entry['metadata'] must be a dict when provided")
+
+        self.entry = entry
+        self.question = question.strip()
+        self.prompt = self.build_prompt()
+
+        self.last_response = None
+        self.answer = None
+        self.current_step = 0
+        self.acceptor = False
+        self.reward = None
+        self.terminated = False
+        self.severity = None
+
+        return {
+            "dataset_name": self.dataset_name,
+            "question": self.question,
+            "prompt": self.prompt,
+        }
 
     def reset(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
         ...
