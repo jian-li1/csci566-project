@@ -11,6 +11,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+import reasoning_gym
+from reasoning_gym import get_score_answer_fn
+
 # severity constants (same names as math/mbpp)
 SEVERITY_END_EPISODE = "end_episode"
 SEVERITY_END_ROLLOUT = "end_rollout"
@@ -38,7 +41,32 @@ def extract_answer(response: str) -> tuple[str | None, str | None]:
 
 class ReasoningGymEnv:
     def __init__(self, dataset_name: str, **kwargs: Any) -> None:
-        ...
+        if not isinstance(dataset_name, str) or not dataset_name.strip():
+            raise ValueError("dataset_name must be a non-empty string")
+
+        size = int(kwargs.pop("size", 500))
+        seed = int(kwargs.pop("seed", 0))
+        accept_threshold = float(kwargs.pop("accept_threshold", ACCEPT_THRESHOLD))
+
+        self.dataset_name = dataset_name.strip()
+        self.name = self.dataset_name
+        self.accept_threshold = accept_threshold
+        self.dataset = reasoning_gym.create_dataset(
+            self.dataset_name, size=size, seed=seed, **kwargs
+        )
+        self._score_fn = get_score_answer_fn(self.dataset_name)
+
+        self.entry: dict[str, Any] | None = None
+        self.question: str | None = None
+        self.prompt: str | None = None
+
+        self.last_response: str | None = None
+        self.answer: str | None = None
+        self.current_step: int = 0
+        self.acceptor: bool = False
+        self.reward: float | None = None
+        self.terminated: bool = False
+        self.severity: str | None = None
 
     def build_prompt(self) -> str:
         ...
