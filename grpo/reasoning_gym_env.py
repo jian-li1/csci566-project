@@ -108,7 +108,32 @@ class ReasoningGymEnv:
         }
 
     def reset(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        ...
+        entry = kwargs.pop("entry", None)
+        if entry is None and "row" in kwargs:
+            entry = kwargs.pop("row")
+
+        index = kwargs.pop("index", None)
+        if args:
+            if len(args) != 1:
+                raise TypeError("reset expects at most one positional argument")
+            if entry is not None or index is not None:
+                raise ValueError("pass only one of index, entry/row, or a positional arg")
+            arg = args[0]
+            if isinstance(arg, dict):
+                entry = arg
+            else:
+                index = arg
+
+        if kwargs:
+            raise TypeError(f"unexpected keyword arguments: {sorted(kwargs)}")
+        if entry is not None and index is not None:
+            raise ValueError("pass only one of index or entry/row")
+
+        if entry is not None:
+            return self.load_problem(entry)
+        if index is None:
+            index = 0
+        return self.load_problem(self.dataset[int(index)])
 
     def score_answer(self, answer: str) -> float:
         ...
