@@ -69,7 +69,11 @@ class ReasoningGymEnv:
         self.severity: str | None = None
 
     def build_prompt(self) -> str:
-        ...
+        return (
+            f"{self.question}\n\n"
+            "Put step-by-step reasoning in <think>...</think> and only the final "
+            "answer in <answer>...</answer>."
+        )
 
     def load_problem(self, entry: dict[str, Any]) -> dict[str, Any]:
         ...
