@@ -2,7 +2,7 @@ from transformers import AutoProcessor, AutoModelForMultimodalLM
 from peft import LoraConfig, get_peft_model
 import torch
 
-class GemmaModel:
+class TransformerModel:
     def __init__ (self, model_id):
         self.processor = AutoProcessor.from_pretrained(model_id) # Load the processor for the specified model
         self.model = AutoModelForMultimodalLM.from_pretrained(
@@ -114,7 +114,7 @@ class GemmaModel:
 
 
 
-    def generate(self, question:str, max_new_tokens = 512):
+    def generate(self, question:str, max_new_tokens = 4096):
         self.model.eval()
         messages = [
             {

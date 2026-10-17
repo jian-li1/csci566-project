@@ -7,11 +7,8 @@ import argparse
 from torch.utils.data import Subset
 
 from custom_dataset_loader import custom_dataset_loader
-from gemma import GemmaModel
+from transformermodel import TransformerModel
 from training_loops import TrainingLoops
-
-MODEL_ID = "google/gemma-4-E2B-it"
-
 
 def main():
     parser = argparse.ArgumentParser(description="Train Gemma with required validation")
@@ -35,6 +32,7 @@ def main():
     parser.add_argument("--bsize", type=int, default=1)
     parser.add_argument("--tp", type=float, default=0.8)
     parser.add_argument("--vp", type=float, default=0.2)
+    parser.add_argument("--model", type=str, default= "meta-llama/Llama-3.2-3B", help="Model use Llama/Llama-3.2-3B by default")
     parser.add_argument("--outdir", default="./checkpoints")
     args = parser.parse_args()
 
@@ -97,7 +95,7 @@ def main():
     else:
         print(f"Provided split: train={len(trainset)}, val={len(valset)} records")
 
-    model = GemmaModel(MODEL_ID)
+    model = TransformerModel(args.model)
     training = TrainingLoops(
         model=model,
         dataset=dataset,
