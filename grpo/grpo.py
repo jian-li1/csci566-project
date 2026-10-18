@@ -52,7 +52,14 @@ REQUIRED_COLUMNS = ("prompt", "numbers", "target")
 # CLI — sweep knobs live here; fixed geometry stays in constants above
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="TRL GRPO on countdown (AFM + LoRA)")
+    parser = argparse.ArgumentParser(description="TRL GRPO on Reasoning Gym (countdown, knights_knaves, shortest path), Math and Coding (pending)")
+    parser.add_argument(
+        "--task",
+        type=str,
+        required=True,
+        choices=("countdown", "knights_knaves", "shortest_path", "math", "coding"),
+        help="Task to train on. Choices: countdown, knights_knaves, shortest_path, math, coding",
+    )
     parser.add_argument(
         "--G",
         type=int,
@@ -65,11 +72,14 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help=(
-            "Your train data: local .parquet / .json / .jsonl path, a directory of those, "
-            "or a Hugging Face dataset id. Rows need prompt, numbers, target "
-            "(or prompt + meta JSON with numbers/target)."
+            "Train data: local .parquet / .json / .jsonl path, a directory of those, "
+            "or a Hugging Face dataset id. Row schema depends on --task: "
+            "RG tasks (countdown, knights_knaves, shortest_path) need "
+            "question/answer/metadata (prompt may be built in normalize); "
+            "math needs problem/solution (and optional level/type)."
         ),
     )
+
     parser.add_argument(
         "--dataset-split",
         type=str,
