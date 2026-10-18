@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from datasets import Dataset, DatasetDict, load_dataset
-from peft import PeftModel, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
@@ -30,6 +30,10 @@ from grpo.math import MathEnv
 # ---------------------------------------------------------------------------
 # Fixed experiment constants (same for every G arm)
 # ---------------------------------------------------------------------------
+# Base model for all runs (Hugging Face id or local path). Edit this to switch.
+MODEL_ID = "Qwen/Qwen3.5-4B-Base"
+MODEL_2_ID = "Llama/Llama-3.2-3B-Base"
+
 # Completions used in one optimizer update. Must stay constant across --G.
 ROLLOUTS_PER_STEP = 64
 # How those 64 are built: microbatch × grad_accum (not via generation_batch_size).
@@ -297,25 +301,38 @@ def make_math_reward():
 
 
 # ---------------------------------------------------------------------------
-# Model — base AFM + LoRA (fresh or continued from SFT adapter)
+# Model — base checkpoint + LoRA (fresh or continued from SFT adapter)
 # ---------------------------------------------------------------------------
+def build_lora_config() -> LoraConfig:
+    """Broadly compatible causal-LM LoRA config (same idea as math/train.py)."""
+    return LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        bias="none",
+        task_type="CAUSAL_LM",
+        target_modules="all-linear",
+    )
+
+
 def load_model(init_adapter: str | None):
     # No device_map: let the Trainer / vLLM colocate placement own the device.
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
         torch_dtype="bfloat16",
-        attn_implementation="sdpa",  # safer than flash_attention_2 for AFM
+        attn_implementation="sdpa",
     )
 
     if init_adapter:
         # SFT → GRPO arm: continue training an existing adapter.
         model = PeftModel.from_pretrained(model, init_adapter, is_trainable=True)
     else:
-        # Fresh LoRA for GRPO-from-base (same knobs as SFT via configs.py).
+        # Fresh LoRA for GRPO-from-base.
         model = get_peft_model(model, build_lora_config())
 
     model.print_trainable_parameters()
     return model
+
 
 
 # ---------------------------------------------------------------------------
