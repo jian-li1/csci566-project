@@ -22,8 +22,10 @@ from trl import GRPOConfig, GRPOTrainer
 # ---------------------------------------------------------------------------
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from configs import MODEL_ID, build_lora_config
-from envs.countdown import CountdownEnv
+from grpo.countdown import CountdownEnv
+from grpo.knights_knaves import KnightsKnavesEnv
+from grpo.shortest_path import ShortestPathEnv
+from grpo.math import MathEnv
 
 # ---------------------------------------------------------------------------
 # Fixed experiment constants (same for every G arm)
@@ -243,11 +245,18 @@ class CompletionTokenCallback(TrainerCallback):
 # ---------------------------------------------------------------------------
 # Reward — TRL calls this on generated completions; returns one float each
 # ---------------------------------------------------------------------------
-def make_countdown_reward():
-    """Build a GRPO reward_fn that scores completions with CountdownEnv."""
-    env = CountdownEnv()
+def make_reasoning_gym_reward(task: str):
+    """Build a GRPO reward_fn that scores completions with ReasoningGymEnv."""
+    if task == "countdown":
+        env = CountdownEnv()
+    elif task == "knights_knaves":
+        env = KnightsKnavesEnv()
+    elif task == "shortest_path":
+        env = ShortestPathEnv()
+    else:
+        raise ValueError(f"Unknown task: {task}")
 
-    def reward_countdown(completions, numbers, target, **kwargs):
+    def reward_reasoning_gym(completions, numbers, target, **kwargs):
         # `numbers` / `target` come from matching dataset columns (see REQUIRED_COLUMNS).
         rewards = []
         for completion, nums, tgt in zip(completions, numbers, target):
@@ -268,7 +277,13 @@ def make_countdown_reward():
             rewards.append(0.0 if r is None else float(r))
         return rewards
 
-    return reward_countdown
+    return reward_reasoning_gym
+
+
+def make_math_reward():
+    env = MathEnv()
+    ## add in the math reward function here
+    continue
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +313,12 @@ def load_model(init_adapter: str | None):
 # ---------------------------------------------------------------------------
 def main() -> None:
     args = parse_args()
+
+    ## if args task is math:
+
+
+    ## else if args task is countdown, knights_knaves, or shortest path:
+
 
     # --- sanity checks on fixed batch geometry ---
     if ROLLOUTS_PER_STEP % args.G != 0:
@@ -376,7 +397,7 @@ def main() -> None:
     token_cb = CompletionTokenCallback(ROLLOUTS_PER_STEP, output_dir)
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[make_countdown_reward()],
+        reward_funcs=[make_reasoning_gym_reward()],
         args=training_args,
         train_dataset=dataset,
         processing_class=tokenizer,
