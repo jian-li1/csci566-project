@@ -51,6 +51,25 @@ TEMPERATURE = 1.0
 # Columns the countdown reward reads from the train dataset.
 REQUIRED_COLUMNS = ("prompt", "numbers", "target")
 
+# tasks
+RG_TASKS = ("countdown", "knights_knaves", "shortest_path")
+TASKS = {
+    "countdown": {
+        "reward": lambda: make_reasoning_gym_reward("countdown"),
+    },
+    "knights_knaves": {
+        "reward": lambda: make_reasoning_gym_reward("knights_knaves"),
+    },
+    "shortest_path": {
+        "reward": lambda: make_reasoning_gym_reward("shortest_path"),
+    },
+    "math": {
+        "reward": lambda: make_math_reward(),
+    },
+    "coding": {
+        "reward": lambda: make_coding_reward(),
+    },
+}
 
 # ---------------------------------------------------------------------------
 # CLI — sweep knobs live here; fixed geometry stays in constants above
@@ -340,12 +359,7 @@ def load_model(init_adapter: str | None):
 # ---------------------------------------------------------------------------
 def main() -> None:
     args = parse_args()
-
-    ## if args task is math:
-
-
-    ## else if args task is countdown, knights_knaves, or shortest path:
-
+    spec = TASKS[args.task]
 
     # --- sanity checks on fixed batch geometry ---
     if ROLLOUTS_PER_STEP % args.G != 0:
@@ -424,7 +438,7 @@ def main() -> None:
     token_cb = CompletionTokenCallback(ROLLOUTS_PER_STEP, output_dir)
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[make_reasoning_gym_reward()],
+        reward_funcs=[spec["reward"]()],
         args=training_args,
         train_dataset=dataset,
         processing_class=tokenizer,
