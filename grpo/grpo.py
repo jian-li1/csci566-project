@@ -48,26 +48,28 @@ DEFAULT_LR = 2e-5
 BETA = 0.001  # KL coefficient vs reference policy
 TEMPERATURE = 1.0
 
-# Columns the countdown reward reads from the train dataset.
-REQUIRED_COLUMNS = ("prompt", "numbers", "target")
-
 # tasks
 RG_TASKS = ("countdown", "knights_knaves", "shortest_path")
 TASKS = {
     "countdown": {
         "reward": lambda: make_reasoning_gym_reward("countdown"),
+        "required_columns": ("prompt", "question", "answer"),
     },
     "knights_knaves": {
         "reward": lambda: make_reasoning_gym_reward("knights_knaves"),
+        "required_columns": ("prompt", "question", "answer"),
     },
     "shortest_path": {
         "reward": lambda: make_reasoning_gym_reward("shortest_path"),
+        "required_columns": ("prompt", "question", "answer"),
     },
     "math": {
         "reward": lambda: make_math_reward(),
+        "required_columns": ("prompt", "problem", "solution"),
     },
     "coding": {
         "reward": lambda: make_coding_reward(),
+        "required_columns": ("prompt",),
     },
 }
 
@@ -136,31 +138,51 @@ def _parse_meta(meta):
     raise TypeError(f"Unsupported meta type: {type(meta)}")
 
 
-def _normalize_row(row: dict) -> dict:
-    """
-    Map one raw row → {prompt, numbers, target, ...}.
+def _rg_entry(out: dict) -> dict:
+    """Build a Reasoning Gym entry; parse metadata in-place when present."""
+    entry = {"question": out["question"], "answer": out["answer"]}
+    if out.get("metadata") is not None:
+        entry["metadata"] = _parse_meta(out["metadata"])
+        out["metadata"] = entry["metadata"]
+    return entry
 
-    Accepts either flat columns or prompt + meta{numbers, target}.
+
+def _normalize_row(row: dict, task: str) -> dict:
+    """
+    Map one raw row → {prompt, ...scoring columns...}.
+
+    Builds `prompt` via the task env; keeps gold fields for the reward fn.
     """
     out = dict(row)
-    if "prompt" not in out:
-        raise ValueError(f"Row missing 'prompt'. Keys={sorted(out)}")
+    if task in RG_TASKS:
+        if task == "countdown":
+            env = CountdownEnv()
+        elif task == "knights_knaves":
+            env = KnightsKnavesEnv()
+        else:
+            env = ShortestPathEnv()
+        obs = env.load_problem(_rg_entry(out))
+    elif task == "math":
+        env = CompetitionMathEnv()
+        obs = env.load_problem(
+            out["problem"],
+            out["solution"],
+            level=out.get("level"),
+            problem_type=out.get("type"),
+        )
+    elif task == "coding":
+        raise NotImplementedError(
+            "coding dataset normalize is not implemented yet "
+            "(make_coding_reward is a no-op stub only)"
+        )
+    else:
+        raise ValueError(f"Unknown task: {task}")
 
-    # Pull reward fields out of meta if they aren't top-level columns.
-    if "numbers" not in out or "target" not in out:
-        meta = _parse_meta(out.get("meta"))
-        if "numbers" not in out:
-            out["numbers"] = meta["numbers"]
-        if "target" not in out:
-            out["target"] = meta["target"]
-
-    if isinstance(out["numbers"], str):
-        out["numbers"] = json.loads(out["numbers"])
-    out["target"] = int(out["target"])
+    out["prompt"] = obs["prompt"]
     return out
 
 
-def load_train_dataset(source: str, split: str) -> Dataset:
+def load_train_dataset(source: str, split: str, task: str) -> Dataset:
     """Load user data from disk or the HF Hub, then normalize + validate schema."""
     path = Path(source)
 
@@ -189,13 +211,13 @@ def load_train_dataset(source: str, split: str) -> Dataset:
         dataset = dataset[split]
 
     # --- normalize rows, then fail fast on missing reward columns ---
-    dataset = dataset.map(_normalize_row)
-    missing = [c for c in REQUIRED_COLUMNS if c not in dataset.column_names]
+    dataset = dataset.map(_normalize_row, fn_kwargs={"task": task})
+    required = TASKS[task]["required_columns"]
+    missing = [c for c in required if c not in dataset.column_names]
     if missing:
         raise ValueError(
-            f"Dataset missing required columns {missing}. "
-            f"Have {dataset.column_names}. Provide prompt/numbers/target "
-            "or prompt + meta{{numbers,target}}."
+            f"Dataset missing required columns {missing} for task={task!r}. "
+            f"Have {dataset.column_names}."
         )
 
     # AFM-Base path assumes plain-string prompts (no chat template).
@@ -289,13 +311,10 @@ def make_reasoning_gym_reward(task: str):
     else:
         raise ValueError(f"Unknown task: {task}")
 
-    def reward_reasoning_gym(completions, numbers, target, **kwargs):
-        # `numbers` / `target` come from matching dataset columns (see REQUIRED_COLUMNS).
+    def reward_reasoning_gym(completions, question, answer, metadata=None, **kwargs):
+        metas = metadata if metadata is not None else [None] * len(completions)
         rewards = []
-        for completion, nums, tgt in zip(completions, numbers, target):
-            if isinstance(nums, str):
-                nums = json.loads(nums)
-
+        for completion, q, a, meta in zip(completions, question, answer, metas):
             # TRL may pass plain strings or chat-style message lists.
             if isinstance(completion, list):
                 text = completion[-1].get("content", "") if completion else ""
@@ -303,7 +322,10 @@ def make_reasoning_gym_reward(task: str):
                 text = completion or ""
 
             # Bind the dataset puzzle (do not resample via generate_problem).
-            env.load_problem(nums, int(tgt))
+            entry = {"question": q, "answer": a}
+            if meta is not None:
+                entry["metadata"] = _parse_meta(meta)
+            env.load_problem(entry)
             out = env.step(text)
             r = out["reward"]
             # TRL expects a float per completion; unscored → 0.0.
@@ -418,7 +440,7 @@ def main() -> None:
     )
 
     # --- data / tokenizer / model ---
-    dataset = load_train_dataset(args.dataset, args.dataset_split)
+    dataset = load_train_dataset(args.dataset, args.dataset_split, task=args.task)
     print(dataset)
     print(f"columns={dataset.column_names} | rows={len(dataset)}")
 
