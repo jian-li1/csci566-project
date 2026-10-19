@@ -25,7 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
 from grpo.shortest_path import ShortestPathEnv
-from grpo.math import MathEnv
+from grpo.math import CompetitionMathEnv
 
 # ---------------------------------------------------------------------------
 # Fixed experiment constants (same for every G arm)
@@ -312,12 +312,32 @@ def make_reasoning_gym_reward(task: str):
 
     return reward_reasoning_gym
 
-
 def make_math_reward():
-    env = MathEnv()
-    ## add in the math reward function here
-    continue
+    env = CompetitionMathEnv()
 
+    def reward_math(completions, problem, solution, level=None, type=None, **kwargs):
+        # Dataset columns are repeated to match completions by TRL.
+        levels = level if level is not None else [None] * len(completions)
+        problem_types = type if type is not None else [None] * len(completions)
+        rewards = []
+        for completion, question, gold, difficulty, subject in zip(
+            completions, problem, solution, levels, problem_types
+        ):
+            # TRL may pass plain strings or chat-style message lists.
+            if isinstance(completion, list):
+                text = completion[-1].get("content", "") if completion else ""
+            else:
+                text = completion or ""
+
+            # Bind the matching dataset row; never expose the worked solution.
+            env.load_problem(question, gold, difficulty, subject)
+            out = env.step(text)
+            reward = out["reward"]
+            # TRL expects a float per completion; unscored → 0.0.
+            rewards.append(0.0 if reward is None else float(reward))
+        return rewards
+    
+    return reward_math
 
 # ---------------------------------------------------------------------------
 # Model — base checkpoint + LoRA (fresh or continued from SFT adapter)
