@@ -339,6 +339,16 @@ def make_math_reward():
     
     return reward_math
 
+
+def make_coding_reward():
+    """Placeholder coding reward — scores nothing (all zeros) until MBPP is wired."""
+
+    def reward_coding(completions, **kwargs):
+        return [0.0] * len(completions)
+
+    return reward_coding
+
+
 # ---------------------------------------------------------------------------
 # Model — base checkpoint + LoRA (fresh or continued from SFT adapter)
 # ---------------------------------------------------------------------------
