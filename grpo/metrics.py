@@ -1,6 +1,9 @@
 """
 GRPO analysis & stability metrics (owner: Manasa).
 
+Note: no `import math` here on purpose: grpo/math/ is a package and would shadow
+the stdlib module when grpo/ is on sys.path.
+
 Tracks, per step and per task:
   - reward distribution        reward/{task}/mean|std|min|max|hist
   - accept rate                reward/{task}/accept_rate   (env acceptor flag)
@@ -32,7 +35,6 @@ env's load_problem() takes). TRL passes extra dataset columns to reward function
 from __future__ import annotations
 
 import json
-import math
 import os
 import sys
 from collections import defaultdict, deque
@@ -90,7 +92,7 @@ def _std(xs: list[float]) -> float:
     if len(xs) < 2:
         return 0.0
     m = sum(xs) / len(xs)
-    return math.sqrt(sum((x - m) ** 2 for x in xs) / (len(xs) - 1))
+    return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
 
 
 class GRPOMetrics:
