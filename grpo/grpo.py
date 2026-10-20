@@ -1,10 +1,11 @@
 """
-GRPO training script (TRL) for countdown-style tasks.
+GRPO training script (TRL) for multi-task runs (Reasoning Gym, math, coding stub).
 
 Ablation design:
   - Hold rollouts/optimizer-step fixed at 64 for every arm.
   - Vary only --G (completions per prompt): 4, 8, or 16.
   - Stop by --max-steps so compute matches across arms.
+  - One run = one --task.
 """
 
 import argparse
@@ -25,14 +26,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
 from grpo.shortest_path import ShortestPathEnv
-from grpo.math import CompetitionMathEnv
+from grpo.math import CompetitionMathEnv, extract_boxed_answer
 
 # ---------------------------------------------------------------------------
 # Fixed experiment constants (same for every G arm)
 # ---------------------------------------------------------------------------
 # Base model for all runs (Hugging Face id or local path). Edit this to switch.
 MODEL_ID = "Qwen/Qwen3.5-4B-Base"
-MODEL_2_ID = "Llama/Llama-3.2-3B-Base"
+#MODEL_2_ID = "Llama/Llama-3.2-3B-Base"
+#MODEL_3_ID = ""
 
 # Completions used in one optimizer update. Must stay constant across --G.
 ROLLOUTS_PER_STEP = 64
@@ -47,6 +49,14 @@ DEFAULT_LR = 2e-5
 # Pin RL sampling/KL; TRL defaults have changed between versions.
 BETA = 0.001  # KL coefficient vs reference policy
 TEMPERATURE = 1.0
+
+# Qwen3.5 is loaded as a text-only causal LM by Transformers, while vLLM uses
+# the checkpoint's multimodal wrapper and therefore expects different prefixes.
+QWEN35_MODEL_TYPES = ("qwen3_5", "qwen3_5_text")
+QWEN35_VLLM_PREFIX_MAP = (
+    ("lm_head.", "language_model.lm_head."),
+    ("model.", "language_model.model."),
+)
 
 # tasks
 RG_TASKS = ("countdown", "knights_knaves", "shortest_path")
@@ -147,6 +157,12 @@ def _rg_entry(out: dict) -> dict:
     return entry
 
 
+def _has_usable_reference(row: dict) -> bool:
+    """Reject math rows whose worked solution has no non-empty boxed answer."""
+    answer = extract_boxed_answer(row.get("solution", ""))
+    return answer is not None and bool(answer.strip())
+
+
 def _normalize_row(row: dict, task: str) -> dict:
     """
     Map one raw row → {prompt, ...scoring columns...}.
@@ -171,10 +187,8 @@ def _normalize_row(row: dict, task: str) -> dict:
             problem_type=out.get("type"),
         )
     elif task == "coding":
-        raise NotImplementedError(
-            "coding dataset normalize is not implemented yet "
-            "(make_coding_reward is a no-op stub only)"
-        )
+        # Pass-through stub — no env, no prompt build; reward is also a no-op.
+        return out
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -209,6 +223,14 @@ def load_train_dataset(source: str, split: str, task: str) -> Dataset:
         if split not in dataset:
             raise ValueError(f"Split '{split}' not in dataset. Available: {list(dataset)}")
         dataset = dataset[split]
+
+    # Math: drop rows with missing/empty \\boxed{...} gold before normalize.
+    if task == "math":
+        rows_before_filter = len(dataset)
+        dataset = dataset.filter(_has_usable_reference)
+        dropped_rows = rows_before_filter - len(dataset)
+        if dropped_rows:
+            print(f"Dropped {dropped_rows} rows with missing/empty boxed gold answers")
 
     # --- normalize rows, then fail fast on missing reward columns ---
     dataset = dataset.map(_normalize_row, fn_kwargs={"task": task})
@@ -405,6 +427,25 @@ def load_model(init_adapter: str | None):
     return model
 
 
+def patch_qwen35_vllm_weight_sync(trainer: GRPOTrainer, model: PeftModel) -> bool:
+    """Map text-only Qwen3.5 weight names to vLLM's multimodal wrapper."""
+    vllm_generation = getattr(trainer, "vllm_generation", None)
+    model_type = getattr(model.get_base_model().config, "model_type", None)
+    if vllm_generation is None or model_type not in QWEN35_MODEL_TYPES:
+        return False
+
+    original_fix = vllm_generation._fix_param_name_to_vllm
+
+    def fix_param_name(name: str, extra_prefixes: list[str] | None = None) -> str:
+        name = original_fix(name, extra_prefixes)
+        for prefix, replacement in QWEN35_VLLM_PREFIX_MAP:
+            if name.startswith(prefix):
+                return name.replace(prefix, replacement, 1)
+        return name
+
+    vllm_generation._fix_param_name_to_vllm = fix_param_name
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Main — wire data, model, config, trainer; run GRPO
@@ -424,7 +465,7 @@ def main() -> None:
     # prompts per optimizer step changes with G; rollouts (64) do not
     prompts_per_step = ROLLOUTS_PER_STEP // args.G
     lr_tag = f"{args.lr:.0e}".replace("e-0", "e-").replace("e+0", "e+")
-    run_name = f"grpo-G{args.G}-lr{lr_tag}-s{args.seed}"
+    run_name = f"grpo-{args.task}-G{args.G}-lr{lr_tag}-s{args.seed}"
     output_dir = args.output_dir or f"GRPO/{run_name}"
 
     print(
@@ -478,7 +519,7 @@ def main() -> None:
         logging_steps=1,
         log_completions=True,  # inspect samples in W&B (catch reward hacking)
         report_to=["wandb"],
-        remove_unused_columns=False,  # keep numbers/target for the reward fn
+        remove_unused_columns=False,  # keep question/answer or problem/solution for reward
         use_vllm=True,
         vllm_mode="colocate",  # vLLM shares the training GPU
         vllm_gpu_memory_utilization=0.3,  # leave headroom for the train model
@@ -496,6 +537,9 @@ def main() -> None:
         processing_class=tokenizer,
         callbacks=[token_cb],
     )
+
+    if patch_qwen35_vllm_weight_sync(trainer, model):
+        print("Enabled Qwen3.5 Hugging Face → vLLM weight-name compatibility mapping.")
 
     trainer.train()
     trainer.save_model(output_dir)
