@@ -13,17 +13,17 @@ import json
 import sys
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# Repo root on path before local imports (python grpo/grpo.py from anywhere).
+# ---------------------------------------------------------------------------
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from datasets import Dataset, DatasetDict, load_dataset
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
+
 from compute_budget import ComputeBudgetCallback
-
-# ---------------------------------------------------------------------------
-# Imports from this repo when launched as: python train/grpo.py
-# ---------------------------------------------------------------------------
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
 from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
 from grpo.shortest_path import ShortestPathEnv
@@ -104,7 +104,8 @@ def parse_args() -> argparse.Namespace:
         type=str,
         required=True,
         help=(
-            "Train data: local .parquet / .json / .jsonl path, a directory of those, "
+            "Train data: local .parquet / .json / .jsonl file, a directory containing "
+            "<split>.parquet|.jsonl|.json (see --dataset-split), "
             "or a Hugging Face dataset id. Row schema depends on --task: "
             "RG tasks (countdown, knights_knaves, shortest_path) need "
             "question/answer/metadata (prompt may be built in normalize); "
@@ -124,10 +125,11 @@ def parse_args() -> argparse.Namespace:
         "--stage",
         type=str,
         default="none",
-        choices=("none", "sft_then_grpo:sft", "sft_then_grpo:grpo"),
+        choices=("none", "sft_then_grpo:grpo"),
         help=(
-            "Budget stage: none = full budget (pure GRPO); "
-            "sft_then_grpo:sft = 25%% of B; sft_then_grpo:grpo = 75%% of B."
+            "Budget stage for this GRPO script: none = full budget (pure GRPO); "
+            "sft_then_grpo:grpo = 75%% of B (GRPO half of SFT→GRPO). "
+            "Run SFT separately with stage sft_then_grpo:sft."
         ),
     )
 
@@ -225,24 +227,38 @@ def _normalize_row(row: dict, task: str) -> dict:
     return out
 
 
+def _load_local_dataset(path: Path, split: str) -> Dataset:
+    """Load one local file, or ``<directory>/<split>.{parquet,jsonl,json}``."""
+    if path.is_dir():
+        candidates = [
+            path / f"{split}.parquet",
+            path / f"{split}.jsonl",
+            path / f"{split}.json",
+        ]
+        matches = [candidate for candidate in candidates if candidate.exists()]
+        if not matches:
+            raise ValueError(
+                f"No '{split}.parquet', '{split}.jsonl', or '{split}.json' in {path}"
+            )
+        path = matches[0]
+
+    suffix = path.suffix.lower()
+    if suffix == ".parquet":
+        return load_dataset("parquet", data_files=str(path), split="train")
+    if suffix in {".jsonl", ".json"}:
+        return load_dataset("json", data_files=str(path), split="train")
+    raise ValueError(
+        f"Unsupported local file type '{suffix}'. Use .parquet, .json, or .jsonl."
+    )
+
+
 def load_train_dataset(source: str, split: str, task: str) -> Dataset:
     """Load user data from disk or the HF Hub, then normalize + validate schema."""
     path = Path(source)
 
     # --- resolve source ---
     if path.exists():
-        if path.is_dir():
-            dataset = load_dataset("parquet", data_dir=str(path), split=split)
-        else:
-            suffix = path.suffix.lower()
-            if suffix == ".parquet":
-                dataset = load_dataset("parquet", data_files=str(path), split="train")
-            elif suffix in {".jsonl", ".json"}:
-                dataset = load_dataset("json", data_files=str(path), split="train")
-            else:
-                raise ValueError(
-                    f"Unsupported local file type '{suffix}'. Use .parquet, .json, or .jsonl."
-                )
+        dataset = _load_local_dataset(path, split)
     else:
         # Not a local path → treat as Hugging Face dataset id (e.g. org/name)
         dataset = load_dataset(source, split=split)
@@ -522,7 +538,7 @@ def main() -> None:
         stage=budget_stage,
         lora=True,
     )
-    metrics = GRPOMetrics(output_dir)
+    metrics = GRPOMetrics(output_dir, max_completion_length=1024)
     if args.task == "coding":
         reward_fn = make_coding_reward()
     else:
