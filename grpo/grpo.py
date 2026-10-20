@@ -149,6 +149,21 @@ def parse_args() -> argparse.Namespace:
         help="Path to an SFT LoRA adapter to continue from (SFT→GRPO arm).",
     )
     parser.add_argument("--output-dir", type=str, default=None)
+    parser.add_argument(
+        "--no-vllm",
+        action="store_true",
+        help=(
+            "Disable colocated vLLM (use HF generate). Recommended for Windows / "
+            "first laptop GPU smokes; CARC full runs usually keep vLLM on."
+        ),
+    )
+    parser.add_argument(
+        "--report-to",
+        type=str,
+        default="wandb",
+        choices=("wandb", "none"),
+        help="Logging backend (default: wandb). Use none for offline laptop smokes.",
+    )
     return parser.parse_args()
 
 
@@ -505,7 +520,8 @@ def main() -> None:
         num_generations=args.G,  # only ablation knob in the batch math
         max_prompt_length=512,
         max_completion_length=1024,  # room for <think>…<answer>
-        optim="adamw_8bit",
+        # bitsandbytes 8-bit Adam is awkward on Windows; use torch Adam without vLLM.
+        optim="adamw_torch" if args.no_vllm else "adamw_8bit",
         max_steps=args.max_steps,  # matched compute; not num_train_epochs
         warmup_ratio=0.03,  # short warmup; LR still decays linearly to 0 by default
         bf16=True,
@@ -519,9 +535,9 @@ def main() -> None:
         save_total_limit=None,  # keep early ckpts for accuracy-vs-compute curves
         logging_steps=1,
         log_completions=True,  # inspect samples in W&B (catch reward hacking)
-        report_to=["wandb"],
+        report_to=[] if args.report_to == "none" else [args.report_to],
         remove_unused_columns=False,  # keep task/entry for metrics reward_fn
-        use_vllm=True,
+        use_vllm=not args.no_vllm,
         vllm_mode="colocate",  # vLLM shares the training GPU
         vllm_gpu_memory_utilization=0.3,  # leave headroom for the train model
         run_name=run_name,
@@ -552,7 +568,7 @@ def main() -> None:
         callbacks=[token_cb, budget_cb, GRPOMetricsCallback(metrics)],
     )
 
-    if patch_qwen35_vllm_weight_sync(trainer, model):
+    if not args.no_vllm and patch_qwen35_vllm_weight_sync(trainer, model):
         print("Enabled Qwen3.5 Hugging Face → vLLM weight-name compatibility mapping.")
 
     trainer.train()
