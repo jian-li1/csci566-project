@@ -17,6 +17,7 @@ from datasets import Dataset, DatasetDict, load_dataset
 from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
+from compute_budget import ComputeBudgetCallback
 
 # ---------------------------------------------------------------------------
 # Imports from this repo when launched as: python train/grpo.py
@@ -27,6 +28,7 @@ from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
 from grpo.shortest_path import ShortestPathEnv
 from grpo.math import CompetitionMathEnv, extract_boxed_answer
+from grpo.metrics import GRPOMetrics, GRPOMetricsCallback, make_env_reward_fn
 
 # ---------------------------------------------------------------------------
 # Fixed experiment constants (same for every G arm)
@@ -62,24 +64,19 @@ QWEN35_VLLM_PREFIX_MAP = (
 RG_TASKS = ("countdown", "knights_knaves", "shortest_path")
 TASKS = {
     "countdown": {
-        "reward": lambda: make_reasoning_gym_reward("countdown"),
-        "required_columns": ("prompt", "question", "answer"),
+        "required_columns": ("prompt", "task", "entry"),
     },
     "knights_knaves": {
-        "reward": lambda: make_reasoning_gym_reward("knights_knaves"),
-        "required_columns": ("prompt", "question", "answer"),
+        "required_columns": ("prompt", "task", "entry"),
     },
     "shortest_path": {
-        "reward": lambda: make_reasoning_gym_reward("shortest_path"),
-        "required_columns": ("prompt", "question", "answer"),
+        "required_columns": ("prompt", "task", "entry"),
     },
     "math": {
-        "reward": lambda: make_math_reward(),
-        "required_columns": ("prompt", "problem", "solution"),
+        "required_columns": ("prompt", "task", "entry"),
     },
     "coding": {
-        "reward": lambda: make_coding_reward(),
-        "required_columns": ("prompt",),
+        "required_columns": ("prompt", "task", "entry"),
     },
 }
 
@@ -112,6 +109,25 @@ def parse_args() -> argparse.Namespace:
             "RG tasks (countdown, knights_knaves, shortest_path) need "
             "question/answer/metadata (prompt may be built in normalize); "
             "math needs problem/solution (and optional level/type)."
+        ),
+    )
+    parser.add_argument(
+        "--budget",
+        type=float,
+        default=None,
+        help=(
+            "Compute budget in weighted tokens (FLOPs/N) for this model. "
+            "Omit to track spend without stopping. Per-model B values TBD."
+        ),
+    )
+    parser.add_argument(
+        "--stage",
+        type=str,
+        default="none",
+        choices=("none", "sft_then_grpo:sft", "sft_then_grpo:grpo"),
+        help=(
+            "Budget stage: none = full budget (pure GRPO); "
+            "sft_then_grpo:sft = 25%% of B; sft_then_grpo:grpo = 75%% of B."
         ),
     )
 
@@ -165,11 +181,14 @@ def _has_usable_reference(row: dict) -> bool:
 
 def _normalize_row(row: dict, task: str) -> dict:
     """
-    Map one raw row → {prompt, ...scoring columns...}.
+    Map one raw row → {prompt, task, entry, ...}.
 
-    Builds `prompt` via the task env; keeps gold fields for the reward fn.
+    Builds `prompt` via the task env; `entry` is what metrics/reward pass to
+    load_problem (RG dict, or math/MBPP-compatible payload).
     """
     out = dict(row)
+    out["task"] = task
+
     if task in RG_TASKS:
         if task == "countdown":
             env = CountdownEnv()
@@ -177,22 +196,39 @@ def _normalize_row(row: dict, task: str) -> dict:
             env = KnightsKnavesEnv()
         else:
             env = ShortestPathEnv()
-        obs = env.load_problem(_rg_entry(out))
+        entry = _rg_entry(out)
+        obs = env.load_problem(entry)
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
     elif task == "math":
         env = CompetitionMathEnv()
+        entry = {
+            "problem": out["problem"],
+            "solution": out["solution"],
+        }
+        if out.get("level") is not None:
+            entry["level"] = out["level"]
+        if out.get("type") is not None:
+            entry["type"] = out["type"]
+        # Prefer entry dict once CompetitionMathEnv.load_problem(dict) lands;
+        # positional keeps normalize working in the meantime.
         obs = env.load_problem(
-            out["problem"],
-            out["solution"],
-            level=out.get("level"),
-            problem_type=out.get("type"),
+            entry["problem"],
+            entry["solution"],
+            level=entry.get("level"),
+            problem_type=entry.get("type"),
         )
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
     elif task == "coding":
-        # Pass-through stub — no env, no prompt build; reward is also a no-op.
-        return out
+        # Pass-through stub — expect prompt (+ optional entry) already in the row.
+        if "entry" not in out:
+            out["entry"] = {}
+        if "prompt" not in out:
+            raise ValueError("coding pass-through requires a prebuilt 'prompt' column")
     else:
         raise ValueError(f"Unknown task: {task}")
 
-    out["prompt"] = obs["prompt"]
     return out
 
 
@@ -320,68 +356,24 @@ class CompletionTokenCallback(TrainerCallback):
 
 
 # ---------------------------------------------------------------------------
-# Reward — TRL calls this on generated completions; returns one float each
+# Env factory — metrics make_env_reward_fn expects load_problem(entry: dict)
 # ---------------------------------------------------------------------------
-def make_reasoning_gym_reward(task: str):
-    """Build a GRPO reward_fn that scores completions with ReasoningGymEnv."""
+def make_env_for_task(task: str):
+    """Return an env instance keyed the same way as dataset column `task`."""
     if task == "countdown":
-        env = CountdownEnv()
-    elif task == "knights_knaves":
-        env = KnightsKnavesEnv()
-    elif task == "shortest_path":
-        env = ShortestPathEnv()
-    else:
-        raise ValueError(f"Unknown task: {task}")
-
-    def reward_reasoning_gym(completions, question, answer, metadata=None, **kwargs):
-        metas = metadata if metadata is not None else [None] * len(completions)
-        rewards = []
-        for completion, q, a, meta in zip(completions, question, answer, metas):
-            # TRL may pass plain strings or chat-style message lists.
-            if isinstance(completion, list):
-                text = completion[-1].get("content", "") if completion else ""
-            else:
-                text = completion or ""
-
-            # Bind the dataset puzzle (do not resample via generate_problem).
-            entry = {"question": q, "answer": a}
-            if meta is not None:
-                entry["metadata"] = _parse_meta(meta)
-            env.load_problem(entry)
-            out = env.step(text)
-            r = out["reward"]
-            # TRL expects a float per completion; unscored → 0.0.
-            rewards.append(0.0 if r is None else float(r))
-        return rewards
-
-    return reward_reasoning_gym
-
-def make_math_reward():
-    env = CompetitionMathEnv()
-
-    def reward_math(completions, problem, solution, level=None, type=None, **kwargs):
-        # Dataset columns are repeated to match completions by TRL.
-        levels = level if level is not None else [None] * len(completions)
-        problem_types = type if type is not None else [None] * len(completions)
-        rewards = []
-        for completion, question, gold, difficulty, subject in zip(
-            completions, problem, solution, levels, problem_types
-        ):
-            # TRL may pass plain strings or chat-style message lists.
-            if isinstance(completion, list):
-                text = completion[-1].get("content", "") if completion else ""
-            else:
-                text = completion or ""
-
-            # Bind the matching dataset row; never expose the worked solution.
-            env.load_problem(question, gold, difficulty, subject)
-            out = env.step(text)
-            reward = out["reward"]
-            # TRL expects a float per completion; unscored → 0.0.
-            rewards.append(0.0 if reward is None else float(reward))
-        return rewards
-    
-    return reward_math
+        return CountdownEnv()
+    if task == "knights_knaves":
+        return KnightsKnavesEnv()
+    if task == "shortest_path":
+        return ShortestPathEnv()
+    if task == "math":
+        # Friend will add load_problem(entry: dict) on CompetitionMathEnv.
+        return CompetitionMathEnv()
+    if task == "coding":
+        raise NotImplementedError(
+            "coding has no env yet; use the no-op reward path for --task coding"
+        )
+    raise ValueError(f"Unknown task: {task}")
 
 
 def make_coding_reward():
@@ -452,7 +444,8 @@ def patch_qwen35_vllm_weight_sync(trainer: GRPOTrainer, model: PeftModel) -> boo
 # ---------------------------------------------------------------------------
 def main() -> None:
     args = parse_args()
-    spec = TASKS[args.task]
+    if args.task not in TASKS:
+        raise ValueError(f"Unknown task: {args.task!r}")
 
     # --- sanity checks on fixed batch geometry ---
     if ROLLOUTS_PER_STEP % args.G != 0:
@@ -519,7 +512,7 @@ def main() -> None:
         logging_steps=1,
         log_completions=True,  # inspect samples in W&B (catch reward hacking)
         report_to=["wandb"],
-        remove_unused_columns=False,  # keep question/answer or problem/solution for reward
+        remove_unused_columns=False,  # keep task/entry for metrics reward_fn
         use_vllm=True,
         vllm_mode="colocate",  # vLLM shares the training GPU
         vllm_gpu_memory_utilization=0.3,  # leave headroom for the train model
@@ -528,14 +521,27 @@ def main() -> None:
 
     # --- train ---
     # Loop inside TRL: sample G completions/prompt → score → group-normalize → update.
+    # Map CLI "none" → None (full budget). Library stages are sft_then_grpo:*.
+    budget_stage = None if args.stage == "none" else args.stage
     token_cb = CompletionTokenCallback(ROLLOUTS_PER_STEP, output_dir)
+    budget_cb = ComputeBudgetCallback(
+        output_dir,
+        budget=args.budget,
+        stage=budget_stage,
+        lora=True,
+    )
+    metrics = GRPOMetrics(output_dir)
+    if args.task == "coding":
+        reward_fn = make_coding_reward()
+    else:
+        reward_fn = make_env_reward_fn({args.task: make_env_for_task(args.task)}, metrics)
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=[spec["reward"]()],
+        reward_funcs=[reward_fn],
         args=training_args,
         train_dataset=dataset,
         processing_class=tokenizer,
-        callbacks=[token_cb],
+        callbacks=[token_cb, budget_cb, GRPOMetricsCallback(metrics)],
     )
 
     if patch_qwen35_vllm_weight_sync(trainer, model):
