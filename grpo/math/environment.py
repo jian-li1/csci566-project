@@ -263,12 +263,38 @@ class CompetitionMathEnv:
 
     def load_problem(
         self,
-        problem: str,
-        solution: str,
+        problem: str | dict[str, Any],
+        solution: str | None = None,
         level: str | None = None,
         problem_type: str | None = None,
     ) -> dict[str, Any]:
-        """Bind one dataset row and reset all per-episode values."""
+        """
+        Bind one dataset row and reset all per-episode values.
+
+        The preferred form matches ``ReasoningGymEnv.load_problem(entry)``::
+
+            env.load_problem({
+                "problem": "...",
+                "solution": "...",
+                "level": "Level 1",
+                "type": "Algebra",
+            })
+
+        The positional form is retained for existing training scripts::
+
+            env.load_problem(problem, solution, level, problem_type)
+        """
+        if isinstance(problem, dict):
+            if solution is not None or level is not None or problem_type is not None:
+                raise TypeError(
+                    "when problem is a dict, do not pass solution, level, or problem_type"
+                )
+            row = problem
+            problem = row["problem"]
+            solution = row["solution"]
+            level = row.get("level")
+            problem_type = row.get("type")
+
         if not isinstance(problem, str) or not problem.strip():
             raise ValueError("problem must be a non-empty string")
         if not isinstance(solution, str) or not solution.strip():
@@ -316,12 +342,7 @@ class CompetitionMathEnv:
         """
         if not isinstance(row, dict):
             raise TypeError(f"row must be a dict, got {type(row)}")
-        return self.load_problem(
-            problem=row["problem"],
-            solution=row["solution"],
-            level=row.get("level"),
-            problem_type=row.get("type"),
-        )
+        return self.load_problem(row)
 
     def step(self, response: str) -> dict[str, Any]:
         """

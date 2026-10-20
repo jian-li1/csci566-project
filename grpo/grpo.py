@@ -210,14 +210,7 @@ def _normalize_row(row: dict, task: str) -> dict:
             entry["level"] = out["level"]
         if out.get("type") is not None:
             entry["type"] = out["type"]
-        # Prefer entry dict once CompetitionMathEnv.load_problem(dict) lands;
-        # positional keeps normalize working in the meantime.
-        obs = env.load_problem(
-            entry["problem"],
-            entry["solution"],
-            level=entry.get("level"),
-            problem_type=entry.get("type"),
-        )
+        obs = env.load_problem(entry)
         out["entry"] = entry
         out["prompt"] = obs["prompt"]
     elif task == "coding":
@@ -367,7 +360,6 @@ def make_env_for_task(task: str):
     if task == "shortest_path":
         return ShortestPathEnv()
     if task == "math":
-        # Friend will add load_problem(entry: dict) on CompetitionMathEnv.
         return CompetitionMathEnv()
     if task == "coding":
         raise NotImplementedError(

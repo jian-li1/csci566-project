@@ -2,7 +2,12 @@
 
 import unittest
 
-from competition_math import CompetitionMathEnv, check_answer, extract_boxed_answer
+from grpo.math.environment import (
+    CompetitionMathEnv,
+    check_answer,
+    extract_boxed_answer,
+)
+from grpo.metrics import make_env_reward_fn
 
 
 class CompetitionMathEnvTests(unittest.TestCase):
@@ -32,6 +37,52 @@ class CompetitionMathEnvTests(unittest.TestCase):
         self.assertEqual(result["reward"], 1.0)
         self.assertTrue(result["acceptor"])
         self.assertTrue(result["terminated"])
+
+    def test_load_problem_accepts_metrics_entry_dict(self):
+        env = CompetitionMathEnv()
+        observation = env.load_problem(self.row)
+
+        self.assertEqual(observation["problem"], self.row["problem"])
+        self.assertEqual(observation["level"], self.row["level"])
+        self.assertEqual(observation["type"], self.row["type"])
+        self.assertNotIn("solution", observation)
+        self.assertNotIn("reference_answer", observation)
+
+    def test_load_problem_keeps_legacy_positional_form(self):
+        env = CompetitionMathEnv()
+        observation = env.load_problem(
+            self.row["problem"],
+            self.row["solution"],
+            self.row["level"],
+            self.row["type"],
+        )
+
+        self.assertEqual(observation["problem"], self.row["problem"])
+        self.assertEqual(observation["level"], self.row["level"])
+        self.assertEqual(observation["type"], self.row["type"])
+
+    def test_metrics_reward_hook_loads_entry_dict(self):
+        class RecordingMetrics:
+            def __init__(self):
+                self.calls = []
+
+            def record(self, *args):
+                self.calls.append(args)
+
+        metrics = RecordingMetrics()
+        reward_fn = make_env_reward_fn(
+            {"math": CompetitionMathEnv()}, metrics  # type: ignore[arg-type]
+        )
+
+        rewards = reward_fn(
+            prompts=["Solve the problem"],
+            completions=["<answer>1</answer>"],
+            task=["math"],
+            entry=[self.row],
+        )
+
+        self.assertEqual(rewards, [1.0])
+        self.assertEqual(len(metrics.calls), 1)
 
     def test_wrong_answer_gets_zero(self):
         env = CompetitionMathEnv()
