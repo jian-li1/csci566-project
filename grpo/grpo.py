@@ -518,12 +518,11 @@ def main() -> None:
         per_device_train_batch_size=MICRO_BATCH_COMPLETIONS,  # 8
         gradient_accumulation_steps=GRAD_ACCUM_STEPS,  # 8 → 64 / step
         num_generations=args.G,  # only ablation knob in the batch math
-        max_prompt_length=512,
         max_completion_length=1024,  # room for <think>…<answer>
         # bitsandbytes 8-bit Adam is awkward on Windows; use torch Adam without vLLM.
         optim="adamw_torch" if args.no_vllm else "adamw_8bit",
         max_steps=args.max_steps,  # matched compute; not num_train_epochs
-        warmup_ratio=0.03,  # short warmup; LR still decays linearly to 0 by default
+        warmup_steps=0.03,  # short warmup; LR still decays linearly to 0 by default
         bf16=True,
         beta=BETA,
         temperature=TEMPERATURE,
