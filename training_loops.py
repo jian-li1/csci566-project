@@ -13,10 +13,10 @@ class TrainingLoops:
         dataset=None,
         training_portion=0.8,
         validation_portion=0.2,
-        batch_size=4,
-        epochs=20,
+        batch_size=1,
+        epochs=5,
         lr=1e-4,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=16,
         output_dir="./checkpoints",
         trainset=None,
         valset=None,
@@ -84,6 +84,8 @@ class TrainingLoops:
         self._last_saved_step = -1
 
         print("\n===== Training Configuration =====")
+        # print(f"Trainable parameters:     {self.model.model.print_trainable_parameters()}")
+        print(f"Model: {self.model.model_name}")
         print(f"Total dataset size:       {self.total_dataset_size}")
         print(f"Training samples:         {len(self.train_set)}")
         print(f"Validation samples:       {len(self.validation_set)}")
@@ -117,7 +119,8 @@ class TrainingLoops:
             for batch in self.validation_loader:
                 questions = batch["question"]
                 answers = batch["answer"]
-                loss = self.model.calculate_batch_loss(questions, answers)
+                systems = batch.get("system", [""] * len(questions))
+                loss = self.model.calculate_batch_loss(questions=questions,answers=answers,systems=systems)
                 count = len(questions)
                 total_loss += loss.item() * count
                 total_samples += count
@@ -135,7 +138,9 @@ class TrainingLoops:
                 print(f"[Epoch {epoch + 1}/{self.epochs}] Batch {batch_idx + 1}/{len(self.train_loader)}")
                 questions = batch["question"]
                 answers = batch["answer"]
-                loss = self.model.calculate_batch_loss(questions, answers)
+                systems = batch.get("system", [""] * len(questions))
+
+                loss = self.model.calculate_batch_loss(questions= questions, answers= answers, systems=systems)
                 print(f"  Raw batch loss: {loss.item():.4f}")
                 current_batch_size = len(questions)
                 total_loss += loss.item() * current_batch_size
@@ -184,7 +189,7 @@ class TrainingLoops:
         checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{self.global_step}")
         os.makedirs(checkpoint_dir, exist_ok=True)
         self.model.model.save_pretrained(checkpoint_dir)
-        self.model.processor.save_pretrained(checkpoint_dir)
+        self.model.tokenizer.save_pretrained(checkpoint_dir)
         training_state = {
             "epoch": epoch,
             "global_step": self.global_step,

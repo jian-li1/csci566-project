@@ -1,21 +1,21 @@
 #!/bin/bash
 
-#SBATCH --job-name=gemma4_sft
+#SBATCH --job-name=llama_sft
 #SBATCH --partition=gpu
 #SBATCH --account=yzhao010_1531
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
-#SBATCH --time=1:00:00
+#SBATCH --time=6:00:00
 
 # =============== GPU Allocation ===============
 #SBATCH --gpus-per-task=a100:1
 #SBATCH --constraint=a100-80gb
 
 # =============== Slurm Logs ===============
-#SBATCH -o /home1/chunyint/cs566/gemma_%j.out
-#SBATCH -e /home1/chunyint/cs566/gemma_%j.err
+#SBATCH -o /home1/chunyint/cs566/llama_%j.out
+#SBATCH -e /home1/chunyint/cs566/llama_%j.err
 
 # Exit on errors, including failures piped through tee
 set -euo pipefail

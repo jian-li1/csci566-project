@@ -15,24 +15,21 @@ def main():
     parser.add_argument("--source", choices=["custom", "hf"], default="custom")
 
     # Option A: one JSONL file; the runner splits it into train and val.
-    parser.add_argument("--dataset-file", default=None,
-                        help="One JSONL file to split into train and validation")
-
+    parser.add_argument("--dataset-file", default=None, help="One JSONL file to split into train and validation")
     # Option B: both explicit train and val files must be supplied together.
     parser.add_argument("--train-file", default=None, help="Pre-split training JSONL file")
     parser.add_argument("--val-file", default=None, help="Pre-split validation JSONL file")
-
     parser.add_argument("--qcol", default="problem", help="Source question column")
     parser.add_argument("--acol", default="solution", help="Source answer column")
-    parser.add_argument("--samples", type=int, default=None,
-                        help="Optional debugging cap; default None uses every row")
+    parser.add_argument("--scol", default=None, help="Source system column")
+    parser.add_argument("--samples", type=int, default=None, help="Optional debugging cap; default None uses every row")
     parser.add_argument("--ep", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--gstep", type=int, default=2)
+    parser.add_argument("--gstep", type=int, default=16)
     parser.add_argument("--bsize", type=int, default=1)
     parser.add_argument("--tp", type=float, default=0.8)
     parser.add_argument("--vp", type=float, default=0.2)
-    parser.add_argument("--model", type=str, default= "meta-llama/Llama-3.2-3B", help="Model use Llama/Llama-3.2-3B by default")
+    parser.add_argument("--model", type=str, default= "llama", help="Model use Llama/Llama-3.2-3B by default")
     parser.add_argument("--outdir", default="./checkpoints")
     args = parser.parse_args()
 
@@ -60,8 +57,8 @@ def main():
 
     # Auto-split always needs a valid train/validation ratio.
     auto_split = args.source == "hf" or args.dataset_file is not None
-    if auto_split and not (0 < args.tp < 1 and 0 < args.vp < 1
-                           and abs(args.tp + args.vp - 1.0) <= 1e-6):
+
+    if auto_split and not (0 < args.tp < 1 and 0 < args.vp < 1 and abs(args.tp + args.vp - 1.0) <= 1e-6):
         parser.error("For automatic splitting, --tp and --vp must be positive and sum to 1")
 
     dataset = None
@@ -73,13 +70,26 @@ def main():
         print("Loading full Hugging Face math dataset for automatic splitting")
         dataset = MathDataset()
     elif args.dataset_file is not None:
-        print(f"Loading full JSONL dataset for automatic splitting: {args.dataset_file}")
-        dataset = custom_dataset_loader(args.dataset_file, args.qcol, args.acol)
+        dataset = custom_dataset_loader(
+            args.dataset_file,
+            qCol=args.qcol,
+            aCol=args.acol,
+            sCol=args.scol
+        )
     else:
-        print(f"Loading training file: {args.train_file}")
-        print(f"Loading validation file: {args.val_file}")
-        trainset = custom_dataset_loader(args.train_file, args.qcol, args.acol)
-        valset = custom_dataset_loader(args.val_file, args.qcol, args.acol)
+        trainset = custom_dataset_loader(
+            args.train_file,
+            qCol=args.qcol,
+            aCol=args.acol,
+            sCol=args.scol
+        )
+
+        valset = custom_dataset_loader(
+            args.val_file,
+            qCol=args.qcol,
+            aCol=args.acol,
+            sCol=args.scol
+        )
 
     # No cap by default. If debugging, cap only training candidates, not
     # the separately supplied validation dataset.
