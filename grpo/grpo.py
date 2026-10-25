@@ -539,6 +539,7 @@ def main() -> None:
         use_vllm=not args.no_vllm,
         vllm_mode="colocate",  # vLLM shares the training GPU
         vllm_gpu_memory_utilization=0.3,  # leave headroom for the train model
+        vllm_max_model_length=4096,  # cap context so colocated KV cache fits
         run_name=run_name,
     )
 
