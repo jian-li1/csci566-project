@@ -25,7 +25,7 @@ dataset row
 | Knob | Value |
 |------|--------|
 | Completions / optimizer step | 64 (**per device**; multi-GPU changes global effective batch) |
-| `--G` (completions per prompt) | 4, 8, or 16 |
+| `--G` (completions per prompt) | 2, 4, 8, or 16 |
 | Prompts / step | `64 / G` |
 | Stop | `--max-steps` and/or `--budget` (after token accounting is verified) |
 
@@ -166,7 +166,7 @@ A 2-step Countdown (or Math) smoke should show:
 | Flag | Role |
 |------|------|
 | `--task` | `countdown` \| `knights_knaves` \| `shortest_path` \| `math` \| `coding` |
-| `--G` | 4 \| 8 \| 16 |
+| `--G` | 2 \| 4 \| 8 \| 16 |
 | `--dataset` | path or HF id |
 | `--dataset-split` | default `train` |
 | `--lr`, `--max-steps`, `--seed` | training |

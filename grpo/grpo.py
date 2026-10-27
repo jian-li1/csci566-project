@@ -3,7 +3,7 @@ GRPO training script (TRL) for multi-task runs (Reasoning Gym, math, coding stub
 
 Ablation design:
   - Hold rollouts/optimizer-step fixed at 64 for every arm.
-  - Vary only --G (completions per prompt): 4, 8, or 16.
+  - Vary only --G (completions per prompt): 2, 4, 8, or 16.
   - Stop by --max-steps so compute matches across arms.
   - One run = one --task.
 """
@@ -96,7 +96,7 @@ def parse_args() -> argparse.Namespace:
         "--G",
         type=int,
         required=True,
-        choices=(4, 8, 16),
+        choices=(2, 4, 8, 16),
         help="Group size (completions per prompt). Rollouts/step stay fixed at 64.",
     )
     parser.add_argument(
