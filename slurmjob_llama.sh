@@ -23,8 +23,8 @@ set -euo pipefail
 module purge
 
 # =============== Conda Activation ===============
-eval "$(conda shell.bash hook)"
-conda activate venv_1
+eval "$(.conda shell.bash hook)"
+.conda activate venv_1
 
 # =============== Working Directory ===============
 cd /home1/chunyint/cs566
@@ -54,6 +54,7 @@ echo "Checkpoints: $RUN_DIR/checkpoints"
 
 # =============== Training ===============
 python -u model_runner.py \
+    --model llama\
     --samples 50 \
     --source custom \
     --train-file "$DATA_DIR/train.jsonl" \

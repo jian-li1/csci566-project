@@ -1,4 +1,4 @@
-"""Gemma SFT runner: automatic train/validation split or supplied train/val JSONL pair.
+"""SFT runner: automatic train/validation split or supplied train/val JSONL pair.
 
 Validation is always required. Full dataset is used by default.
 """
@@ -31,10 +31,13 @@ def main():
     parser.add_argument("--vp", type=float, default=0.2)
     parser.add_argument("--model", type=str, default= "llama", help="Model use Llama/Llama-3.2-3B by default")
     parser.add_argument("--outdir", default="./checkpoints")
+    parser.add_argument("--max-len", type=int, default=4096, help="Max tokens per sample; longer samples are skipped")
     args = parser.parse_args()
 
     if args.samples is not None and args.samples <= 0:
         parser.error("--samples must be positive")
+    if args.max_len <= 0:
+        parser.error("--max-len must be positive")
     if args.bsize <= 0 or args.gstep <= 0 or args.ep <= 0:
         parser.error("--bsize, --gstep, and --ep must all be positive")
     if args.lr <= 0:
@@ -100,12 +103,18 @@ def main():
             trainset = Subset(trainset, range(min(args.samples, len(trainset))))
         print("WARNING: Debugging subset enabled: not using the full training dataset")
 
+    # The tokenizer is needed to measure samples, so build the model first
+    model = TransformerModel(args.model, max_length=args.max_len)
+
+    # Skip samples longer than --max-len once, before training starts
     if dataset is not None:
+        dataset = model.filter_dataset(dataset, "dataset")
         print(f"Automatic split input: {len(dataset)} records")
     else:
+        trainset = model.filter_dataset(trainset, "train")
+        valset = model.filter_dataset(valset, "val")
         print(f"Provided split: train={len(trainset)}, val={len(valset)} records")
 
-    model = TransformerModel(args.model)
     training = TrainingLoops(
         model=model,
         dataset=dataset,
