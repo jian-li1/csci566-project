@@ -10,7 +10,8 @@
 #SBATCH --time=6:00:00
 
 # =============== GPU Allocation ===============
-#SBATCH --gpus-per-task=l40s:1
+#SBATCH --gpus-per-task=a100:1
+#SBATCH --constraint=a100-80gb
 
 # =============== Slurm Logs (fallback, before RUN_DIR exists) ===============
 #SBATCH -o /home1/chunyint/cs566/logs/llama_%j.out
@@ -29,7 +30,7 @@ conda activate venv_1
 
 # =============== Dataset / Logs ===============
 ROOT_DIR="/home1/chunyint/cs566"
-RUN_DIR="${ROOT_DIR}/logs/math/run_$(date +%Y%m%d_%H%M%S)_${SLURM_JOB_ID}"
+RUN_DIR="${ROOT_DIR}/logs/math/llama/run_$(date +%Y%m%d_%H%M%S)_${SLURM_JOB_ID}"
 DATA_DIR="${ROOT_DIR}/data/competition_math"
 
 
@@ -46,13 +47,12 @@ echo "Checkpoints: $RUN_DIR/checkpoints"
 # =============== Training ===============
 python -u "$ROOT_DIR/src/model_runner.py" \
     --model llama \
-    --samples 50 \
     --source custom \
     --train-file "$DATA_DIR/train.jsonl" \
     --val-file "$DATA_DIR/val.jsonl" \
     --qcol "problem" \
     --acol "solution" \
-    --ep 5 \
+    --ep 3\
     --bsize 1 \
     --gstep 16 \
     --lr 1e-4 \

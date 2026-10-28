@@ -7,6 +7,8 @@ class TransformerModel:
     def __init__ (self, model_name:str, max_length:int = 4096):
         self.model_name = model_name.lower()
         self.max_length = max_length
+        # Per-split results of filter_dataset, read by the run summary
+        self.filter_stats = {}
         if self.model_name == "llama":
             model_id = "meta-llama/Llama-3.2-3B-Instruct"
             model_loader = AutoModelForCausalLM
@@ -17,6 +19,8 @@ class TransformerModel:
 
         else:
             raise ValueError(f"Unsupported model: {model_name}")
+
+        self.model_id = model_id
 
         # Tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
@@ -33,7 +37,7 @@ class TransformerModel:
             device_map="auto",
         )
 
-        lora_config = LoraConfig(
+        self.lora_config = LoraConfig(
             r=8,
             lora_alpha=16,
             lora_dropout=0.05,
@@ -44,10 +48,11 @@ class TransformerModel:
 
         self.model = get_peft_model(
             self.model,
-            lora_config
+            self.lora_config
         )
 
         self.model.print_trainable_parameters()
+        self.trainable_params, self.total_params = self.model.get_nb_trainable_parameters()
 
         trainable_params = [
             p for p in self.model.parameters()
@@ -152,12 +157,15 @@ class TransformerModel:
             f"skipped too long (>{self.max_length} tokens): {too_long} | "
             f"skipped empty answer: {empty}"
         )
+        stats = {"kept": len(keep), "total": len(dataset), "too_long": too_long, "empty": empty}
         if lengths:
             s = sorted(lengths)
+            stats.update(p50=s[len(s) // 2], p95=s[int(len(s) * 0.95)], max=s[-1])
             print(
-                f"[{name}] token lengths: p50={s[len(s) // 2]}, "
-                f"p95={s[int(len(s) * 0.95)]}, max={s[-1]}"
+                f"[{name}] token lengths: p50={stats['p50']}, "
+                f"p95={stats['p95']}, max={stats['max']}"
             )
+        self.filter_stats[name] = stats
         if not keep:
             raise ValueError(f"[{name}] no usable samples left after filtering")
 

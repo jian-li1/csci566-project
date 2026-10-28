@@ -7,8 +7,21 @@ import argparse
 from torch.utils.data import Subset
 
 from custom_dataset_loader import custom_dataset_loader
+from run_summary import RunSummary
 from transformermodel import TransformerModel
 from training_loops import TrainingLoops
+
+
+def describe_filter(stats):
+    """One summary line from TransformerModel.filter_dataset stats."""
+    line = (
+        f"kept {stats['kept']}/{stats['total']} | "
+        f"too long {stats['too_long']} | empty {stats['empty']}"
+    )
+    if "p50" in stats:
+        line += f" | tokens p50={stats['p50']} p95={stats['p95']} max={stats['max']}"
+    return line
+
 
 def main():
     parser = argparse.ArgumentParser(description="Train Gemma with required validation")
@@ -32,12 +45,15 @@ def main():
     parser.add_argument("--model", type=str, default= "llama", help="Model use Llama/Llama-3.2-3B by default")
     parser.add_argument("--outdir", default="./checkpoints")
     parser.add_argument("--max-len", type=int, default=4096, help="Max tokens per sample; longer samples are skipped")
+    parser.add_argument("--log-every", type=int, default=None, help="Print a progress line every N optimizer steps; default is about 20 lines per epoch")
     args = parser.parse_args()
 
     if args.samples is not None and args.samples <= 0:
         parser.error("--samples must be positive")
     if args.max_len <= 0:
         parser.error("--max-len must be positive")
+    if args.log_every is not None and args.log_every <= 0:
+        parser.error("--log-every must be positive")
     if args.bsize <= 0 or args.gstep <= 0 or args.ep <= 0:
         parser.error("--bsize, --gstep, and --ep must all be positive")
     if args.lr <= 0:
@@ -115,6 +131,40 @@ def main():
         valset = model.filter_dataset(valset, "val")
         print(f"Provided split: train={len(trainset)}, val={len(valset)} records")
 
+    summary = RunSummary(args.outdir)
+    lora = model.lora_config
+    # peft expands "all-linear" into the matched module names
+    targets = lora.target_modules
+    if not isinstance(targets, str):
+        targets = ",".join(sorted(targets))
+    summary.set_section("Model", {
+        "Model": f"{model.model_name} ({model.model_id})",
+        "LoRA": (
+            f"r={lora.r}, alpha={lora.lora_alpha}, dropout={lora.lora_dropout}, "
+            f"targets={targets}"
+        ),
+        "Trainable": (
+            f"{model.trainable_params / 1e6:.1f}M / {model.total_params / 1e9:.2f}B params "
+            f"({100 * model.trainable_params / model.total_params:.2f}%)"
+        ),
+    })
+
+    data = {"Source": args.source}
+    if args.source == "hf":
+        data["Dataset"] = "Hugging Face math (hf_math_loader)"
+    elif args.dataset_file is not None:
+        data["Dataset file"] = args.dataset_file
+    else:
+        data["Train file"] = args.train_file
+        data["Val file"] = args.val_file
+    if dataset is not None:
+        data["Split"] = f"automatic {args.tp:g}/{args.vp:g} (seed 42)"
+    data["Samples cap"] = f"{args.samples} (debug subset)" if args.samples else "none (full dataset)"
+    data["Max length"] = f"{args.max_len} tokens"
+    for name, stats in model.filter_stats.items():
+        data[name.capitalize()] = describe_filter(stats)
+    summary.set_section("Data", data)
+
     training = TrainingLoops(
         model=model,
         dataset=dataset,
@@ -127,6 +177,8 @@ def main():
         epochs=args.ep,
         lr=args.lr,
         output_dir=args.outdir,
+        summary=summary,
+        log_every=args.log_every,
     )
     training.train()
 
