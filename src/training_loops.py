@@ -184,9 +184,10 @@ class TrainingLoops:
             self.save_checkpoint(epoch)
 
     def save_checkpoint(self, epoch):
+        mode_name = self.model.model_name
         if self._last_saved_step == self.global_step:
             return
-        checkpoint_dir = os.path.join(self.output_dir, f"checkpoint-{self.global_step}")
+        checkpoint_dir = os.path.join(self.output_dir, f"{mode_name}_checkpoint-{self.global_step}")
         os.makedirs(checkpoint_dir, exist_ok=True)
         self.model.model.save_pretrained(checkpoint_dir)
         self.model.tokenizer.save_pretrained(checkpoint_dir)
