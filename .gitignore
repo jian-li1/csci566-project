@@ -225,3 +225,8 @@ data
 /checkpoints
 
 /.DS_Store
+
+# Training runs and Slurm logs
+/runs
+/logs
+/scripts/checkpoints

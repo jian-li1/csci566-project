@@ -29,35 +29,49 @@ conda activate venv_1
 
 # ... (environment / GPU info unchanged) ...
 
-# =============== Dataset / Logs ===============
+# =============== Dataset / Run Folder ===============
 ROOT_DIR="/home1/chunyint/cs566"
-RUN_DIR="${ROOT_DIR}/logs/math/run_$(date +%Y%m%d_%H%M%S)_${SLURM_JOB_ID}"
-DATA_DIR="${ROOT_DIR}/data/competition_math"
+RUNS_ROOT="${ROOT_DIR}/runs"
+DATASET="competition_math"
+DATA_DIR="${ROOT_DIR}/data/${DATASET}"
+MODEL="qwen"
+EP=3
+LR=1e-4
 
-mkdir -p "$RUN_DIR"
+# runs/<dataset>/<model>/<date>_ep<EP>_lr<LR>_full_j<jobid>/
+RUN_DIR="$(python "${ROOT_DIR}/src/run_paths.py" \
+    --runs-root "$RUNS_ROOT" \
+    --dataset "$DATASET" \
+    --model "$MODEL" \
+    --ep "$EP" \
+    --lr "$LR")"
+mkdir -p "${RUN_DIR}/logs"
 
-# From here on, stdout -> RUN_DIR/slurm.out and stderr -> RUN_DIR/slurm.err
+# From here on, stdout -> logs/slurm.out and stderr -> logs/slurm.err
 # (tee also keeps a copy in the fallback Slurm files above)
-exec > >(tee -a "$RUN_DIR/slurm.out") 2> >(tee -a "$RUN_DIR/slurm.err" >&2)
+exec > >(tee -a "${RUN_DIR}/logs/slurm.out") 2> >(tee -a "${RUN_DIR}/logs/slurm.err" >&2)
 
-echo "Training logs: $RUN_DIR/training.log"
-echo "Errors: $RUN_DIR/training.err"
+echo "Run folder: $RUN_DIR"
+echo "Training logs: $RUN_DIR/logs/training.log"
+echo "Errors: $RUN_DIR/logs/training.err"
 echo "Checkpoints: $RUN_DIR/checkpoints"
 
 # =============== Training ===============
-python -u $ROOT_DIR/src/model_runner.py \
-    --model qwen \
+python -u "${ROOT_DIR}/src/model_runner.py" \
+    --model "$MODEL" \
     --source custom \
-    --train-file "$DATA_DIR/train.jsonl" \
-    --val-file "$DATA_DIR/val.jsonl" \
+    --train-file "${DATA_DIR}/train.jsonl" \
+    --val-file "${DATA_DIR}/val.jsonl" \
     --qcol "problem" \
     --acol "solution" \
-    --ep 3 \
+    --ep "$EP" \
     --bsize 1 \
     --gstep 16 \
-    --lr 1e-4 \
-    --outdir "$RUN_DIR/checkpoints" \
-    > >(tee "$RUN_DIR/training.log") \
-    2> >(tee "$RUN_DIR/training.err" >&2)
+    --lr "$LR" \
+    --dataset-name "$DATASET" \
+    --runs-root "$RUNS_ROOT" \
+    --outdir "$RUN_DIR" \
+    > >(tee "${RUN_DIR}/logs/training.log") \
+    2> >(tee "${RUN_DIR}/logs/training.err" >&2)
 
-echo "Training finished successfully."
+echo "Training finished successfully. Summary: ${RUN_DIR}/summary.txt"

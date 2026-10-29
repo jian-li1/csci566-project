@@ -31,18 +31,16 @@ conda activate venv_1
 export HF_DEACTIVATE_ASYNC_LOAD=1
 export PYTHONFAULTHANDLER=1
 
-# =============== Dataset / Logs ===============
+# =============== Dataset / Runs ===============
 ROOT_DIR="/home1/chunyint/cs566"
-RUN_DIR="${ROOT_DIR}/logs/test/run_$(date +%Y%m%d_%H%M%S)_${SLURM_JOB_ID}"
+# Kept apart from real runs, with its own index.csv
+RUNS_ROOT="${ROOT_DIR}/runs/smoke_test"
 DATA_DIR="${ROOT_DIR}/data/competition_math"
 
 # Auto split of the first SAMPLES rows of train.jsonl (80/20 -> 8 train, 2 val)
 SAMPLES=10
-
-mkdir -p "$RUN_DIR"
-
-# From here on, stdout -> RUN_DIR/slurm.out and stderr -> RUN_DIR/slurm.err
-exec > >(tee -a "$RUN_DIR/slurm.out") 2> >(tee -a "$RUN_DIR/slurm.err" >&2)
+EP=1
+LR=1e-4
 
 echo "===== Environment Information ====="
 echo "Job ID: $SLURM_JOB_ID"
@@ -51,26 +49,35 @@ echo "Python location: $(which python)"
 python --version
 nvidia-smi --query-gpu=name,memory.total,memory.free --format=csv
 
-echo "Logs: $RUN_DIR"
-
 # =============== Training ===============
 for MODEL in llama qwen; do
-    echo "===== Training $MODEL on $SAMPLES samples ====="
-    python -u "$ROOT_DIR/src/model_runner.py" \
+    RUN_DIR="$(python "${ROOT_DIR}/src/run_paths.py" \
+        --runs-root "$RUNS_ROOT" \
+        --dataset competition_math \
+        --model "$MODEL" \
+        --ep "$EP" \
+        --lr "$LR" \
+        --samples "$SAMPLES")"
+    mkdir -p "${RUN_DIR}/logs"
+
+    echo "===== Training $MODEL on $SAMPLES samples -> $RUN_DIR ====="
+    python -u "${ROOT_DIR}/src/model_runner.py" \
         --model "$MODEL" \
         --samples "$SAMPLES" \
         --source custom \
-        --dataset-file "$DATA_DIR/train.jsonl" \
+        --dataset-file "${DATA_DIR}/train.jsonl" \
         --qcol "problem" \
         --acol "solution" \
-        --ep 1 \
+        --ep "$EP" \
         --bsize 1 \
         --gstep 2 \
-        --lr 1e-4 \
-        --outdir "$RUN_DIR/checkpoints" \
-        > >(tee "$RUN_DIR/${MODEL}_training.log") \
-        2> >(tee "$RUN_DIR/${MODEL}_training.err" >&2)
-    echo "===== $MODEL finished ====="
+        --lr "$LR" \
+        --dataset-name competition_math \
+        --runs-root "$RUNS_ROOT" \
+        --outdir "$RUN_DIR" \
+        > >(tee "${RUN_DIR}/logs/training.log") \
+        2> >(tee "${RUN_DIR}/logs/training.err" >&2)
+    echo "===== $MODEL finished: ${RUN_DIR}/summary.txt ====="
 done
 
 echo "Smoke test finished successfully for llama and qwen."

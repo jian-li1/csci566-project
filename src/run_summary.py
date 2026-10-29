@@ -42,9 +42,20 @@ def git_info():
     return f"{commit} (dirty: {'yes' if dirty else 'no'})"
 
 
+INDEX_COLUMNS = [
+    "finished", "dataset", "model", "run", "epochs_done", "lr", "samples",
+    "best_epoch", "best_val_loss", "final_val_loss", "status", "path",
+]
+
+
 class RunSummary:
-    def __init__(self, output_dir):
+    def __init__(self, output_dir, index_path=None, index_info=None):
+        """index_path: shared CSV that gets one row per finished run.
+        index_info: fixed columns for that row (dataset, model, lr, samples).
+        """
         self.output_dir = output_dir
+        self.index_path = index_path
+        self.index_info = index_info or {}
         os.makedirs(output_dir, exist_ok=True)
         self.summary_path = os.path.join(output_dir, "summary.txt")
         self.metrics_path = os.path.join(output_dir, "metrics.csv")
@@ -106,12 +117,48 @@ class RunSummary:
         })
         if self.best is None or val_loss < self.best["val_loss"]:
             self.best = self.epochs[-1]
+            self._link_best(checkpoint)
         self.status = f"running (epoch {epoch}/{self.total_epochs})"
         self.write()
 
     def finish(self, status):
         self.status = status
         self.write()
+        if self.index_path:
+            self._append_index()
+
+    def _link_best(self, checkpoint):
+        """Point <run>/best at the lowest-validation-loss checkpoint."""
+        if not checkpoint:
+            return
+        link = os.path.join(self.output_dir, "best")
+        tmp_link = link + ".tmp"
+        if os.path.lexists(tmp_link):
+            os.remove(tmp_link)
+        # Relative target, so the run folder can be moved or copied
+        os.symlink(os.path.relpath(checkpoint, self.output_dir), tmp_link)
+        os.replace(tmp_link, link)
+
+    def _append_index(self):
+        last = self.epochs[-1] if self.epochs else None
+        row = {
+            "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "run": os.path.basename(os.path.normpath(self.output_dir)),
+            "epochs_done": f"{len(self.epochs)}/{self.total_epochs}",
+            "best_epoch": self.best["epoch"] if self.best else "",
+            "best_val_loss": f"{self.best['val_loss']:.4f}" if self.best else "",
+            "final_val_loss": f"{last['val_loss']:.4f}" if last else "",
+            "status": self.status,
+            "path": os.path.relpath(self.output_dir, os.path.dirname(self.index_path)),
+            **self.index_info,
+        }
+        new_file = not os.path.exists(self.index_path)
+        os.makedirs(os.path.dirname(self.index_path) or ".", exist_ok=True)
+        with open(self.index_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=INDEX_COLUMNS, extrasaction="ignore")
+            if new_file:
+                writer.writeheader()
+            writer.writerow(row)
 
     def _relative(self, path):
         return os.path.relpath(path, self.output_dir) if path else "none"
