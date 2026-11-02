@@ -52,6 +52,10 @@ def main():
     parser.add_argument("--tag", default=None, help="Optional label added to the run name")
     parser.add_argument("--max-len", type=int, default=4096, help="Max tokens per sample; longer samples are skipped")
     parser.add_argument("--log-every", type=int, default=None, help="Print a progress line every N optimizer steps; default is about 20 lines per epoch")
+    parser.add_argument("--budget", type=float, default=None,
+                        help="Compute budget B in weighted tokens (FLOPs/N); omit to track without stopping")
+    parser.add_argument("--budget-stage", default=None, choices=["sft_then_grpo:sft"],
+                        help="Use for the SFT half of SFT->GRPO (spends 25%% of B)")
     args = parser.parse_args()
 
     if args.samples is not None and args.samples <= 0:
@@ -208,6 +212,8 @@ def main():
         output_dir=args.outdir,
         summary=summary,
         log_every=args.log_every,
+        budget=args.budget,
+        budget_stage=args.budget_stage,
     )
     training.train()
 

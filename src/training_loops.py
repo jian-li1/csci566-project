@@ -8,6 +8,12 @@ from transformers import get_linear_schedule_with_warmup
 
 from run_summary import RunSummary, format_duration
 
+import sys
+
+# Shared compute budget (compute_budget/ at the repo root), same module GRPO uses.
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "compute_budget"))
+from compute_budget import ComputeBudget
+
 
 class TrainingLoops:
     def __init__(
@@ -25,6 +31,8 @@ class TrainingLoops:
         valset=None,
         summary=None,
         log_every=None,
+        budget=None,
+        budget_stage=None,
     ):
         self.model = model
         self.batch_size = batch_size
@@ -121,6 +129,14 @@ class TrainingLoops:
         self.summary.set_section("Training config", config)
         self.summary.write()
 
+        # Compute tracking -> <output_dir>/compute.json (tokens, FLOPs, GPU-hours).
+        # budget=None tracks without stopping; budget_stage="sft_then_grpo:sft" uses 25% of B.
+        self.budget_tracker = ComputeBudget(
+            self.output_dir, mode="sft", budget=budget, lora=True, stage=budget_stage
+        )
+        self._window_tokens = 0
+        self._budget_reached = False
+
     def sample_train(self):
         sample = self.train_set[0]
         for epoch in range(2):
@@ -183,6 +199,7 @@ class TrainingLoops:
                 total_examples += current_batch_size
                 window_loss += loss.item() * current_batch_size
                 window_count += current_batch_size
+                self._window_tokens += getattr(self.model, "last_num_tokens", 0)
 
                 # Scale by actual example count in this accumulation window;
                 # this also handles the partial window at the end of an epoch.
@@ -200,6 +217,9 @@ class TrainingLoops:
                     self.scheduler.step()
                     self.optimizer.zero_grad(set_to_none=True)
                     self.global_step += 1
+                    if self.budget_tracker.step(tokens=self._window_tokens):
+                        self._budget_reached = True
+                    self._window_tokens = 0
 
                     current_lr = self.scheduler.get_last_lr()[0]
                     update_loss = window_loss / window_count
@@ -223,6 +243,10 @@ class TrainingLoops:
                     if self.global_step % 50 == 0:
                         self.save_checkpoint(epoch)
 
+                    if self._budget_reached:
+                        print("Compute budget reached; finishing this epoch's validation and stopping.")
+                        break
+
             average_train_loss = total_loss / total_examples
             validation_loss = self.validate()
             epoch_seconds = time.time() - epoch_start
@@ -245,6 +269,8 @@ class TrainingLoops:
                 seconds=epoch_seconds,
                 checkpoint=self._last_checkpoint_dir,
             )
+            if self._budget_reached:
+                break
 
     def save_checkpoint(self, epoch):
         if self._last_saved_step == self.global_step:

@@ -231,6 +231,8 @@ class TransformerModel:
 
     def calculate_batch_loss(self, questions, answers, systems = None):
         inputs, labels = self.prepare_batch(questions= questions ,answers=answers,systems=systems)
+        # tokens processed this batch (prompt included), read by the compute tracker
+        self.last_num_tokens = int(inputs["input_ids"].numel())
         output = self.model(**inputs, labels = labels)
         return output.loss
 
