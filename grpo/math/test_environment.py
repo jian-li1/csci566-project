@@ -38,6 +38,23 @@ class CompetitionMathEnvTests(unittest.TestCase):
         self.assertTrue(result["acceptor"])
         self.assertTrue(result["terminated"])
 
+    def test_think_mention_of_answer_tag_does_not_break_extraction(self):
+        """Regression: mention of <answer> inside <think> must not steal the final body."""
+        env = CompetitionMathEnv()
+        env.reset(self.row)
+        completion = (
+            "<think>\n"
+            "Put the result in `<answer>` tags.\n"
+            "Half plus half is 1.\n"
+            "</think>\n\n"
+            "<answer>1</answer>"
+        )
+        result = env.step(completion)
+        self.assertEqual(result["answer"], "1")
+        self.assertEqual(result["reward"], 1.0)
+        self.assertTrue(result["acceptor"])
+        self.assertIsNone(result["check"]["error"])
+
     def test_load_problem_accepts_metrics_entry_dict(self):
         env = CompetitionMathEnv()
         observation = env.load_problem(self.row)

@@ -40,6 +40,8 @@ import re
 from fractions import Fraction
 from typing import Any
 
+from grpo.answer_extract import extract_answer
+
 try:
     from math_verify import parse as _parse_math
     from math_verify import verify as _verify_math
@@ -419,16 +421,8 @@ class CompetitionMathEnv:
             self.severity = SEVERITY_END_ROLLOUT
             return _out(result)
 
-        # Prompt asks for <answer>...</answer>; score only that body.
-        tags = re.findall(
-            r"<answer>(.*?)</answer>", str(response), flags=re.DOTALL | re.IGNORECASE
-        )
-        if not tags:
-            error = "missing <answer>...</answer>"
-            answer = ""
-        else:
-            answer = tags[-1].strip()
-            error = "empty <answer>" if not answer else None
+        # Prompt asks for a final standalone <answer>...</answer>; score only that body.
+        answer, error = extract_answer(str(response))
         if error is not None:
             result = {
                 "correct": False,

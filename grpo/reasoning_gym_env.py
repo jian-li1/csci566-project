@@ -18,11 +18,12 @@ Typical train loop:
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 import reasoning_gym
 from reasoning_gym import get_score_answer_fn
+
+from grpo.answer_extract import extract_answer
 
 # ---------------------------------------------------------------------------
 # Severity — what the training loop should do after a failure
@@ -34,31 +35,6 @@ SEVERITY_STOP_TRAINING = "stop_training"  # fatal infra error; caller should hal
 
 # RG scores at/above this count as a fully accepted solve.
 ACCEPT_THRESHOLD = 0.99
-
-
-def extract_answer(response: str) -> tuple[str | None, str | None]:
-    """
-    Pull the last <answer>...</answer> body from a model completion.
-
-    Does NOT check correctness — only format/presence.
-    Returns (answer, error). error is None on success.
-    """
-    # Empty / whitespace-only completion → unscored later in step().
-    if response is None or not str(response).strip():
-        return None, "empty response"
-
-    # DOTALL so answers can span lines; IGNORECASE for <Answer> etc.
-    tags = re.findall(
-        r"<answer>(.*?)</answer>", str(response), flags=re.DOTALL | re.IGNORECASE
-    )
-    if not tags:
-        return None, "missing <answer>...</answer>"
-
-    # If the model wrote several <answer> blocks, grade the last one.
-    answer = tags[-1].strip()
-    if not answer:
-        return None, "empty <answer>"
-    return answer, None
 
 
 class ReasoningGymEnv:
