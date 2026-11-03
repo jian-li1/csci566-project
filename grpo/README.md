@@ -72,7 +72,7 @@ Logged (per step / per task), among other things:
 - failure rates (`missing_answer`, `empty_answer`, `verifier_crash`, …)  
 - fraction of groups with zero reward std (no GRPO signal)  
 - advantage stats  
-- length / truncation (**truncation needs** `max_completion_length` on `GRPOMetrics` **and** `completion_ids` from TRL)  
+- length / length-limit proxy (`len/.../hit_length_limit_rate` aka `trunc_rate`: `n_tokens >= max_completion_length`; needs `max_completion_length` on `GRPOMetrics` **and** TRL `completion_ids`. This is not confirmed EOS-absence truncation.)  
 - alerts: KL spike, entropy collapse, reward-std collapse  
 
 Artifacts:

@@ -8,12 +8,16 @@ Tracks, per step and per task:
   - reward distribution        reward/{task}/mean|std|min|max|hist
   - accept rate                reward/{task}/accept_rate   (env acceptor flag)
   - group signal               group/{task}/frac_zero_std | frac_all_correct | frac_all_wrong
-                               (groups with zero reward std give GRPO no gradient)
+                               (reward variance; groups with zero reward std give GRPO no gradient)
+                               group/{task}/frac_none_accepted | frac_all_accepted | frac_mixed_acceptance
+                               (verifier acceptance; partial rewards like 0.05 are not "accepted")
   - advantages                 adv/{task}/abs_mean | std | abs_max   ((r - mean_g) / (std_g + eps))
   - failure cases              fail/{task}/<type>_rate     (missing_answer, empty_answer,
                                                             empty_response, verifier_crash,
                                                             wrong, unscored)
-  - rollout length             len/{task}/mean | p95 | trunc_rate  (needs completion_ids)
+  - rollout length             len/{task}/mean | p95 | trunc_rate  (needs completion_ids;
+                               trunc_rate is a length-limit proxy: n_tokens >= max_completion_length,
+                               not confirmed EOS-absence truncation)
   - stability alerts           alert/kl_spike | alert/entropy_collapse | alert/reward_std_collapse
                                (read from TRL's own logged kl / entropy)
 
@@ -95,6 +99,38 @@ def _std(xs: list[float]) -> float:
     return (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
 
 
+def _completion_n_tokens(token_ids: Any) -> int | None:
+    """
+    Count tokens in one `completion_ids[i]` entry from TRL GRPOTrainer.
+
+    Verified against current TRL (`trl.trainer.grpo_trainer`): reward functions receive
+    a Python list of per-completion ID lists. Those lists are already cut with the
+    generation `completion_mask` (keep tokens through the first EOS); TRL itself logs
+    lengths as `len(ids)`. Padding is applied only later when building train tensors.
+
+    Therefore `len(token_ids)` is the valid generation length. Do **not** strip
+    `pad_token_id` here: train scripts often set `pad_token = eos_token`, so filtering
+    pad would also drop a legitimate trailing EOS.
+
+    If a 1-D tensor is passed, use its numel (already a single sequence). Refuse 2-D /
+    batched tensors — we are not given `completion_mask` in the reward kwargs.
+    """
+    if token_ids is None:
+        return None
+    # torch.Tensor / numpy-like without importing torch (optional dep for offline summary).
+    if hasattr(token_ids, "detach"):
+        t = token_ids.detach().cpu()
+        if getattr(t, "ndim", None) != 1:
+            return None
+        return int(t.numel())
+    if hasattr(token_ids, "ndim") and getattr(token_ids, "ndim") != 1:
+        return None
+    try:
+        return len(token_ids)
+    except TypeError:
+        return None
+
+
 class GRPOMetrics:
     """Buffers rollouts between logging steps and turns them into metrics."""
 
@@ -118,14 +154,21 @@ class GRPOMetrics:
     # ---- collection -------------------------------------------------------
     def record(self, task: str, prompt: str, completion: str, out: dict[str, Any],
                n_tokens: int | None = None) -> None:
-        trunc = (n_tokens is not None and self.max_completion_length is not None
-                 and n_tokens >= self.max_completion_length)
+        # Length-limit proxy only (n >= max_completion_length). Not TRL's EOS-absence
+        # truncation check (`ids[-1] not in eos_and_pad`).
+        hit_length_limit = (
+            n_tokens is not None
+            and self.max_completion_length is not None
+            and n_tokens >= self.max_completion_length
+        )
         row = {
             "step": self.step, "task": task, "prompt": prompt, "completion": completion,
             "reward": out.get("reward"), "acceptor": bool(out.get("acceptor")),
             "severity": out.get("severity"), "fail": _failure_type(out),
             "error": (out.get("check") or {}).get("error"),
-            "n_tokens": n_tokens, "truncated": trunc,
+            "n_tokens": n_tokens,
+            "truncated": hit_length_limit,  # legacy key; means hit_length_limit
+            "hit_length_limit": hit_length_limit,
         }
         self._buf.append(row)
         with open(self.path, "a") as f:
@@ -170,11 +213,30 @@ class GRPOMetrics:
                 m[f"adv/{task}/std"] = _std(advs)
                 m[f"adv/{task}/abs_max"] = max(abs(a) for a in advs)
 
+            # Group by the same prompt, using verifier acceptance.
+            accepted_groups: dict[str, list[bool]] = defaultdict(list)
+            for r in rs:
+                accepted_groups[r["prompt"]].append(bool(r["acceptor"]))
+            ags = [g for g in accepted_groups.values() if len(g) > 1]
+            if ags:
+                m[f"group/{task}/frac_none_accepted"] = (
+                    sum(not any(g) for g in ags) / len(ags)
+                )
+                m[f"group/{task}/frac_all_accepted"] = (
+                    sum(all(g) for g in ags) / len(ags)
+                )
+                m[f"group/{task}/frac_mixed_acceptance"] = (
+                    sum(any(g) and not all(g) for g in ags) / len(ags)
+                )
+
             lens = [r["n_tokens"] for r in rs if r["n_tokens"] is not None]
             if lens:
                 m[f"len/{task}/mean"] = sum(lens) / len(lens)
                 m[f"len/{task}/p95"] = _pct(lens, 0.95)
-                m[f"len/{task}/trunc_rate"] = sum(r["truncated"] for r in rs) / n
+                # Proxy: fraction with n_tokens >= max_completion_length (not EOS-trunc).
+                hit = sum(r.get("hit_length_limit", r["truncated"]) for r in rs) / n
+                m[f"len/{task}/trunc_rate"] = hit  # legacy name
+                m[f"len/{task}/hit_length_limit_rate"] = hit
 
             if any(r["severity"] == "stop_training" for r in rs):
                 m["alert/stop_training"] = 1.0
@@ -203,7 +265,12 @@ def make_env_reward_fn(envs: dict[str, Any], metrics: GRPOMetrics,
             env = envs[t]
             env.load_problem(e)
             out = env.step(text)
-            n_tok = len(completion_ids[i]) if completion_ids is not None else None
+            # TRL passes EOS-trimmed unpadded id lists; see _completion_n_tokens.
+            n_tok = (
+                _completion_n_tokens(completion_ids[i])
+                if completion_ids is not None
+                else None
+            )
             metrics.record(t, ptxt, text, out, n_tok)
             if out.get("severity") == "stop_training":
                 raise RuntimeError(f"[{t}] fatal verifier error: {out['check'].get('error')}")
