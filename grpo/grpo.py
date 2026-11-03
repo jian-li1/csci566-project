@@ -4,7 +4,7 @@ GRPO training script (TRL) for multi-task runs (Reasoning Gym, math, coding stub
 Ablation design:
   - Hold rollouts/optimizer-step fixed at 64 for every arm.
   - Vary only --G (completions per prompt): 2, 4, 8, or 16.
-  - Stop by --max-steps so compute matches across arms.
+  - Stop by --max-steps or --epochs (Slurm-controllable).
   - One run = one --task.
 """
 
@@ -52,6 +52,10 @@ DEFAULT_LR = 2e-5
 BETA = 0.001  # KL coefficient vs reference policy
 TEMPERATURE = 1.0
 
+# Shared generation / vLLM context caps (CLI defaults; override per Slurm job).
+MAX_COMPLETION_TOKENS = 4096
+VLLM_CONTEXT_TOKENS = 5120
+
 # Qwen3.5 is loaded as a text-only causal LM by Transformers, while vLLM uses
 # the checkpoint's multimodal wrapper and therefore expects different prefixes.
 QWEN35_MODEL_TYPES = ("qwen3_5", "qwen3_5_text")
@@ -97,7 +101,10 @@ def parse_args() -> argparse.Namespace:
         type=int,
         required=True,
         choices=(2, 4, 8, 16),
-        help="Group size (completions per prompt). Rollouts/step stay fixed at 64.",
+        help=(
+            "Group size (completions per prompt). Rollouts/step stay fixed at 64 "
+            "(32×2, 16×4, 8×8, or 4×16)."
+        ),
     )
     parser.add_argument(
         "--dataset",
@@ -141,6 +148,27 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--lr", type=float, default=DEFAULT_LR)
     parser.add_argument("--max-steps", type=int, default=DEFAULT_MAX_STEPS)
+    parser.add_argument(
+        "--epochs",
+        type=float,
+        default=None,
+        help=(
+            "If set, train for this many epochs (max_steps=-1). "
+            "Omit to use --max-steps instead."
+        ),
+    )
+    parser.add_argument(
+        "--completion-tokens",
+        type=int,
+        default=MAX_COMPLETION_TOKENS,
+        help=f"Max generated completion tokens (default: {MAX_COMPLETION_TOKENS}).",
+    )
+    parser.add_argument(
+        "--context-tokens",
+        type=int,
+        default=VLLM_CONTEXT_TOKENS,
+        help=f"vLLM max model length / context (default: {VLLM_CONTEXT_TOKENS}).",
+    )
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
     parser.add_argument(
         "--init-adapter",
@@ -484,9 +512,16 @@ def main() -> None:
     run_name = f"grpo-{args.task}-G{args.G}-lr{lr_tag}-s{args.seed}"
     output_dir = args.output_dir or f"GRPO/{run_name}"
 
+    stop = (
+        f"epochs={args.epochs}"
+        if args.epochs is not None
+        else f"max_steps={args.max_steps}"
+    )
     print(
         f"{run_name} | rollouts/step={ROLLOUTS_PER_STEP} | "
-        f"prompts/step={prompts_per_step} | max_steps={args.max_steps} | "
+        f"prompts/step={prompts_per_step} | {stop} | "
+        f"completion_tokens={args.completion_tokens} | "
+        f"context_tokens={args.context_tokens} | "
         f"init_adapter={args.init_adapter!r}"
     )
     print(
@@ -518,10 +553,12 @@ def main() -> None:
         per_device_train_batch_size=MICRO_BATCH_COMPLETIONS,  # 8
         gradient_accumulation_steps=GRAD_ACCUM_STEPS,  # 8 → 64 / step
         num_generations=args.G,  # only ablation knob in the batch math
-        max_completion_length=1024,  # room for <think>…<answer>
+        max_completion_length=args.completion_tokens,  # room for <think>…<answer>
         # bitsandbytes 8-bit Adam is awkward on Windows; use torch Adam without vLLM.
         optim="adamw_torch" if args.no_vllm else "adamw_8bit",
-        max_steps=args.max_steps,  # matched compute; not num_train_epochs
+        # --epochs N → epoch schedule; otherwise fixed --max-steps (default 400).
+        max_steps=-1 if args.epochs is not None else args.max_steps,
+        num_train_epochs=args.epochs if args.epochs is not None else 3.0,
         warmup_steps=0.03,  # short warmup; LR still decays linearly to 0 by default
         bf16=True,
         beta=BETA,
@@ -539,7 +576,7 @@ def main() -> None:
         use_vllm=not args.no_vllm,
         vllm_mode="colocate",  # vLLM shares the training GPU
         vllm_gpu_memory_utilization=0.3,  # leave headroom for the train model
-        vllm_max_model_length=4096,  # cap context so colocated KV cache fits
+        vllm_max_model_length=args.context_tokens,  # cap context so colocated KV cache fits
         run_name=run_name,
     )
 
@@ -554,7 +591,7 @@ def main() -> None:
         stage=budget_stage,
         lora=True,
     )
-    metrics = GRPOMetrics(output_dir, max_completion_length=1024)
+    metrics = GRPOMetrics(output_dir, max_completion_length=training_args.max_completion_length)
     if args.task == "coding":
         reward_fn = make_coding_reward()
     else:
