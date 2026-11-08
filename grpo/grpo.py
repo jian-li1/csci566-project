@@ -6,6 +6,19 @@ Ablation design:
   - Vary only --G (completions per prompt): 2, 4, 8, or 16.
   - Stop by --max-steps or --epochs (Slurm-controllable).
   - One run = one --task.
+
+Train vs held-out eval (see grpo/eval.py):
+  - Train samples with temperature=1.0 and G>1 for group-relative advantages.
+  - Eval uses greedy, one completion per problem — do not point this script
+    at a held-out split if you only want scoring (it will train / update LoRA).
+
+Data flow per step:
+  dataset row → normalize {prompt, task, entry}
+    → sample G completions → make_env_reward_fn (env.step)
+    → GRPO group-normalize + LoRA update
+    → callbacks: completion tokens, compute budget, metrics
+
+Prefer:  python -m grpo.grpo --task ... --G ... --dataset ...
 """
 
 import argparse
@@ -50,9 +63,10 @@ DEFAULT_LR = 2e-5
 
 # Pin RL sampling/KL; TRL defaults have changed between versions.
 BETA = 0.001  # KL coefficient vs reference policy
-TEMPERATURE = 1.0
+TEMPERATURE = 1.0  # stochastic rollouts for GRPO groups (eval uses greedy)
 
 # Shared generation / vLLM context caps (CLI defaults; override per Slurm job).
+# prompt + completion must fit vllm_max_model_length (= --context-tokens).
 MAX_COMPLETION_TOKENS = 4096
 VLLM_CONTEXT_TOKENS = 5120
 
@@ -64,7 +78,8 @@ QWEN35_VLLM_PREFIX_MAP = (
     ("model.", "language_model.model."),
 )
 
-# tasks
+# --task choices. After normalize, every row has prompt / task / entry for the
+# reward fn (TRL passes extra dataset columns through as reward kwargs).
 RG_TASKS = ("countdown", "knights_knaves", "shortest_path")
 TASKS = {
     "countdown": {
@@ -296,7 +311,12 @@ def _load_local_dataset(path: Path, split: str) -> Dataset:
 
 
 def load_train_dataset(source: str, split: str, task: str) -> Dataset:
-    """Load user data from disk or the HF Hub, then normalize + validate schema."""
+    """
+    Load user data from disk or the HF Hub, then normalize + validate schema.
+
+    Raw columns depend on task (RG: question/answer/metadata; math: problem/solution).
+    After normalize every row has prompt (plain str), task, and entry for rewards.
+    """
     path = Path(source)
 
     # --- resolve source ---
@@ -330,7 +350,7 @@ def load_train_dataset(source: str, split: str, task: str) -> Dataset:
             f"Have {dataset.column_names}."
         )
 
-    # AFM-Base path assumes plain-string prompts (no chat template).
+    # Plain-string prompts: message lists make TRL apply a chat template.
     assert len(dataset) > 0, "Train dataset is empty"
     assert isinstance(dataset[0]["prompt"], str), (
         "prompt must be a plain string; message lists make TRL apply a chat "
@@ -411,7 +431,12 @@ class CompletionTokenCallback(TrainerCallback):
 # Env factory — metrics make_env_reward_fn expects load_problem(entry: dict)
 # ---------------------------------------------------------------------------
 def make_env_for_task(task: str):
-    """Return an env instance keyed the same way as dataset column `task`."""
+    """
+    Return an env instance keyed the same way as dataset column `task`.
+
+    Envs own prompting + verification: load_problem(entry) then step(completion)
+    → reward / acceptor / check (see metrics.make_env_reward_fn).
+    """
     if task == "countdown":
         return CountdownEnv()
     if task == "knights_knaves":
@@ -452,6 +477,10 @@ def build_lora_config() -> LoraConfig:
 
 
 def load_model(init_adapter: str | None):
+    """
+    Load MODEL_ID + LoRA. Device placement is left to Trainer / colocated vLLM
+    (no device_map here). For inference-only loading see grpo/eval.py load_policy.
+    """
     # No device_map: let the Trainer / vLLM colocate placement own the device.
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_ID,
@@ -471,7 +500,12 @@ def load_model(init_adapter: str | None):
 
 
 def patch_qwen35_vllm_weight_sync(trainer: GRPOTrainer, model: PeftModel) -> bool:
-    """Map text-only Qwen3.5 weight names to vLLM's multimodal wrapper."""
+    """
+    Map text-only Qwen3.5 weight names to vLLM's multimodal wrapper.
+
+    Without this, colocated vLLM weight sync can silently miss parameters when
+    Transformers loads qwen3_5_text but vLLM expects language_model.* prefixes.
+    """
     vllm_generation = getattr(trainer, "vllm_generation", None)
     model_type = getattr(model.get_base_model().config, "model_type", None)
     if vllm_generation is None or model_type not in QWEN35_MODEL_TYPES:
@@ -494,11 +528,14 @@ def patch_qwen35_vllm_weight_sync(trainer: GRPOTrainer, model: PeftModel) -> boo
 # Main — wire data, model, config, trainer; run GRPO
 # ---------------------------------------------------------------------------
 def main() -> None:
+    """CLI entry: load train data + LoRA → GRPOTrainer.train() → save adapter."""
     args = parse_args()
     if args.task not in TASKS:
         raise ValueError(f"Unknown task: {args.task!r}")
 
     # --- sanity checks on fixed batch geometry ---
+    # G only changes how 64 rollouts are grouped (prompts/step = 64/G), not the
+    # number of completions per optimizer step (must stay matched across arms).
     if ROLLOUTS_PER_STEP % args.G != 0:
         raise ValueError(
             f"ROLLOUTS_PER_STEP ({ROLLOUTS_PER_STEP}) must be divisible by G ({args.G})"
@@ -584,17 +621,21 @@ def main() -> None:
     # Loop inside TRL: sample G completions/prompt → score → group-normalize → update.
     # Map CLI "none" → None (full budget). Library stages are sft_then_grpo:*.
     budget_stage = None if args.stage == "none" else args.stage
+    # Approx completion-token spend for accuracy-vs-tokens plots (completion_tokens.json).
     token_cb = CompletionTokenCallback(ROLLOUTS_PER_STEP, output_dir)
+    # FLOP-weighted token budget; may stop training when --budget is set (compute.json).
     budget_cb = ComputeBudgetCallback(
         output_dir,
         budget=args.budget,
         stage=budget_stage,
         lora=True,
     )
+    # Per-rollout logging → rollouts.jsonl + Trainer/W&B scalars via callback.
     metrics = GRPOMetrics(output_dir, max_completion_length=training_args.max_completion_length)
     if args.task == "coding":
         reward_fn = make_coding_reward()
     else:
+        # Single reward path for RG/math: env.step + metrics.record per completion.
         reward_fn = make_env_reward_fn({args.task: make_env_for_task(args.task)}, metrics)
     trainer = GRPOTrainer(
         model=model,
@@ -609,6 +650,7 @@ def main() -> None:
         print("Enabled Qwen3.5 Hugging Face → vLLM weight-name compatibility mapping.")
 
     trainer.train()
+    # Final adapter weights (also mid-run saves every save_steps).
     trainer.save_model(output_dir)
 
 
