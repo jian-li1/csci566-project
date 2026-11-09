@@ -48,6 +48,8 @@ from datasets import Dataset, DatasetDict, load_dataset
 
 from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
+from grpo.kodcode import KodCodeEnv
+from grpo.opencodeinstruct import OpenCodeInstructEnv
 from grpo.shortest_path import ShortestPathEnv
 from grpo.math import CompetitionMathEnv, extract_boxed_answer
 from grpo.metrics import FAIL_TYPES, _failure_type
@@ -89,7 +91,10 @@ TASKS = {
     "math": {
         "required_columns": ("prompt", "task", "entry"),
     },
-    "coding": {
+    "kodcode": {
+        "required_columns": ("prompt", "task", "entry"),
+    },
+    "opencodeinstruct": {
         "required_columns": ("prompt", "task", "entry"),
     },
 }
@@ -129,7 +134,7 @@ def _normalize_row(row: dict, task: str) -> dict:
     Map one raw row → {prompt, task, entry, ...}.
 
     Builds `prompt` via the task env; `entry` is what metrics/reward pass to
-    load_problem (RG dict, or math/MBPP-compatible payload).
+    load_problem (RG / math / KodCode / OpenCodeInstruct payload).
     """
     out = dict(row)
     out["task"] = task
@@ -158,12 +163,28 @@ def _normalize_row(row: dict, task: str) -> dict:
         obs = env.load_problem(entry)
         out["entry"] = entry
         out["prompt"] = obs["prompt"]
-    elif task == "coding":
-        # Pass-through stub — expect prompt (+ optional entry) already in the row.
-        if "entry" not in out:
-            out["entry"] = {}
-        if "prompt" not in out:
-            raise ValueError("coding pass-through requires a prebuilt 'prompt' column")
+    elif task == "kodcode":
+        env = KodCodeEnv()
+        entry = {
+            "question": out["question"],
+            "test": out["test"],
+        }
+        if out.get("question_id") is not None:
+            entry["question_id"] = out["question_id"]
+        obs = env.load_problem(entry)
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
+    elif task == "opencodeinstruct":
+        env = OpenCodeInstructEnv()
+        entry = {
+            "input": out["input"],
+            "unit_tests": out["unit_tests"],
+        }
+        if out.get("id") is not None:
+            entry["id"] = out["id"]
+        obs = env.load_problem(entry)
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -278,7 +299,18 @@ def grading_reference_for_row(row: dict, task: str) -> dict:
             "level": entry.get("level"),
             "type": entry.get("type"),
         }
-    # coding / other: fingerprint the whole entry payload
+    if task == "kodcode":
+        return {
+            "question_id": entry.get("question_id"),
+            "question": entry.get("question"),
+            "test": entry.get("test"),
+        }
+    if task == "opencodeinstruct":
+        return {
+            "id": entry.get("id"),
+            "input": entry.get("input"),
+            "unit_tests": entry.get("unit_tests"),
+        }
     return dict(entry)
 
 
@@ -313,11 +345,6 @@ def canonical_prompt(example: dict, task: str) -> str:
 # ---------------------------------------------------------------------------
 def make_env_for_task(task: str):
     """Return an env instance keyed the same way as dataset column `task`."""
-    if task == "coding":
-        raise NotImplementedError(
-            "coding eval is not available until MBPP is wired into shared eval; "
-            "refuse --task coding"
-        )
     if task == "countdown":
         return CountdownEnv()
     if task == "knights_knaves":
@@ -326,6 +353,10 @@ def make_env_for_task(task: str):
         return ShortestPathEnv()
     if task == "math":
         return CompetitionMathEnv()
+    if task == "kodcode":
+        return KodCodeEnv()
+    if task == "opencodeinstruct":
+        return OpenCodeInstructEnv()
     raise ValueError(f"Unknown task: {task}")
 
 
@@ -382,10 +413,16 @@ def problem_id_for_row(row: dict, task: str) -> str:
     Prefer an explicit dataset id; otherwise hash task-specific content
     (not row order, which can change with filters / max-examples).
     """
-    for key in ("problem_id", "task_id", "id", "uid", "example_id"):
+    for key in ("problem_id", "task_id", "question_id", "id", "uid", "example_id"):
         value = row.get(key)
         if value is not None and str(value).strip() != "":
             return str(value)
+    entry = row.get("entry")
+    if isinstance(entry, dict):
+        for key in ("question_id", "id"):
+            value = entry.get(key)
+            if value is not None and str(value).strip() != "":
+                return str(value)
 
     if task in RG_TASKS:
         payload = {
@@ -402,8 +439,21 @@ def problem_id_for_row(row: dict, task: str) -> str:
             "level": row.get("level"),
             "type": row.get("type"),
         }
+    elif task == "kodcode":
+        payload = {
+            "task": task,
+            "question_id": row.get("question_id"),
+            "question": row.get("question"),
+            "test": row.get("test"),
+        }
+    elif task == "opencodeinstruct":
+        payload = {
+            "task": task,
+            "id": row.get("id"),
+            "input": row.get("input"),
+            "unit_tests": row.get("unit_tests"),
+        }
     else:
-        entry = row.get("entry")
         payload = {
             "task": task,
             "prompt": row.get("prompt"),
@@ -1017,15 +1067,26 @@ def summarize_results(results: list[dict]) -> dict:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Held-out eval for GRPO checkpoints (Reasoning Gym, math, coding stub)."
+            "Held-out eval for GRPO checkpoints (Reasoning Gym, math, "
+            "KodCode, OpenCodeInstruct)."
         )
     )
     parser.add_argument(
         "--task",
         type=str,
         required=True,
-        choices=("countdown", "knights_knaves", "shortest_path", "math"),
-        help="Task / env to evaluate (coding rejected until MBPP is wired).",
+        choices=(
+            "countdown",
+            "knights_knaves",
+            "shortest_path",
+            "math",
+            "kodcode",
+            "opencodeinstruct",
+        ),
+        help=(
+            "Task / env to evaluate. Choices: countdown, knights_knaves, "
+            "shortest_path, math, kodcode, opencodeinstruct."
+        ),
     )
     parser.add_argument(
         "--dataset",

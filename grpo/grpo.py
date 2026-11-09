@@ -1,5 +1,5 @@
 """
-GRPO training script (TRL) for multi-task runs (Reasoning Gym, math, coding stub).
+GRPO training script (TRL) for multi-task runs (Reasoning Gym, math, KodCode, OpenCodeInstruct).
 
 Ablation design:
   - Hold rollouts/optimizer-step fixed at 64 for every arm.
@@ -39,6 +39,8 @@ from trl import GRPOConfig, GRPOTrainer
 from compute_budget import ComputeBudgetCallback
 from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
+from grpo.kodcode import KodCodeEnv
+from grpo.opencodeinstruct import OpenCodeInstructEnv
 from grpo.shortest_path import ShortestPathEnv
 from grpo.math import CompetitionMathEnv, extract_boxed_answer
 from grpo.metrics import GRPOMetrics, GRPOMetricsCallback, make_env_reward_fn
@@ -94,7 +96,10 @@ TASKS = {
     "math": {
         "required_columns": ("prompt", "task", "entry"),
     },
-    "coding": {
+    "kodcode": {
+        "required_columns": ("prompt", "task", "entry"),
+    },
+    "opencodeinstruct": {
         "required_columns": ("prompt", "task", "entry"),
     },
 }
@@ -103,13 +108,28 @@ TASKS = {
 # CLI — sweep knobs live here; fixed geometry stays in constants above
 # ---------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="TRL GRPO on Reasoning Gym (countdown, knights_knaves, shortest path), Math and Coding (pending)")
+    parser = argparse.ArgumentParser(
+        description=(
+            "TRL GRPO on Reasoning Gym (countdown, knights_knaves, shortest path), "
+            "Math, KodCode, and OpenCodeInstruct"
+        )
+    )
     parser.add_argument(
         "--task",
         type=str,
         required=True,
-        choices=("countdown", "knights_knaves", "shortest_path", "math", "coding"),
-        help="Task to train on. Choices: countdown, knights_knaves, shortest_path, math, coding",
+        choices=(
+            "countdown",
+            "knights_knaves",
+            "shortest_path",
+            "math",
+            "kodcode",
+            "opencodeinstruct",
+        ),
+        help=(
+            "Task to train on. Choices: countdown, knights_knaves, shortest_path, "
+            "math, kodcode, opencodeinstruct"
+        ),
     )
     parser.add_argument(
         "--G",
@@ -244,7 +264,7 @@ def _normalize_row(row: dict, task: str) -> dict:
     Map one raw row → {prompt, task, entry, ...}.
 
     Builds `prompt` via the task env; `entry` is what metrics/reward pass to
-    load_problem (RG dict, or math/MBPP-compatible payload).
+    load_problem (RG / math / KodCode / OpenCodeInstruct payload).
     """
     out = dict(row)
     out["task"] = task
@@ -273,12 +293,28 @@ def _normalize_row(row: dict, task: str) -> dict:
         obs = env.load_problem(entry)
         out["entry"] = entry
         out["prompt"] = obs["prompt"]
-    elif task == "coding":
-        # Pass-through stub — expect prompt (+ optional entry) already in the row.
-        if "entry" not in out:
-            out["entry"] = {}
-        if "prompt" not in out:
-            raise ValueError("coding pass-through requires a prebuilt 'prompt' column")
+    elif task == "kodcode":
+        env = KodCodeEnv()
+        entry = {
+            "question": out["question"],
+            "test": out["test"],
+        }
+        if out.get("question_id") is not None:
+            entry["question_id"] = out["question_id"]
+        obs = env.load_problem(entry)
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
+    elif task == "opencodeinstruct":
+        env = OpenCodeInstructEnv()
+        entry = {
+            "input": out["input"],
+            "unit_tests": out["unit_tests"],
+        }
+        if out.get("id") is not None:
+            entry["id"] = out["id"]
+        obs = env.load_problem(entry)
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -314,7 +350,8 @@ def load_train_dataset(source: str, split: str, task: str) -> Dataset:
     """
     Load user data from disk or the HF Hub, then normalize + validate schema.
 
-    Raw columns depend on task (RG: question/answer/metadata; math: problem/solution).
+    Raw columns depend on task (RG: question/answer/metadata; math: problem/solution;
+    kodcode: question/test; opencodeinstruct: input/unit_tests).
     After normalize every row has prompt (plain str), task, and entry for rewards.
     """
     path = Path(source)
@@ -445,20 +482,11 @@ def make_env_for_task(task: str):
         return ShortestPathEnv()
     if task == "math":
         return CompetitionMathEnv()
-    if task == "coding":
-        raise NotImplementedError(
-            "coding has no env yet; use the no-op reward path for --task coding"
-        )
+    if task == "kodcode":
+        return KodCodeEnv()
+    if task == "opencodeinstruct":
+        return OpenCodeInstructEnv()
     raise ValueError(f"Unknown task: {task}")
-
-
-def make_coding_reward():
-    """Placeholder coding reward — scores nothing (all zeros) until MBPP is wired."""
-
-    def reward_coding(completions, **kwargs):
-        return [0.0] * len(completions)
-
-    return reward_coding
 
 
 # ---------------------------------------------------------------------------
@@ -632,11 +660,8 @@ def main() -> None:
     )
     # Per-rollout logging → rollouts.jsonl + Trainer/W&B scalars via callback.
     metrics = GRPOMetrics(output_dir, max_completion_length=training_args.max_completion_length)
-    if args.task == "coding":
-        reward_fn = make_coding_reward()
-    else:
-        # Single reward path for RG/math: env.step + metrics.record per completion.
-        reward_fn = make_env_reward_fn({args.task: make_env_for_task(args.task)}, metrics)
+    # Single reward path for RG/math/coding: env.step + metrics.record per completion.
+    reward_fn = make_env_reward_fn({args.task: make_env_for_task(args.task)}, metrics)
     trainer = GRPOTrainer(
         model=model,
         reward_funcs=[reward_fn],
