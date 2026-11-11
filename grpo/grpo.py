@@ -1,5 +1,5 @@
 """
-GRPO training script (TRL) for multi-task runs (Reasoning Gym, math, KodCode, OpenCodeInstruct).
+GRPO training script (TRL) for multi-task runs (Reasoning Gym, math, KodCode, OpenCodeInstruct, OpenMathReasoning).
 
 Ablation design:
   - Hold rollouts/optimizer-step fixed at 64 for every arm.
@@ -41,6 +41,7 @@ from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
 from grpo.kodcode import KodCodeEnv
 from grpo.opencodeinstruct import OpenCodeInstructEnv
+from grpo.openmathreasoning import OpenMathReasoningEnv
 from grpo.shortest_path import ShortestPathEnv
 from grpo.math import CompetitionMathEnv, extract_boxed_answer
 from grpo.metrics import GRPOMetrics, GRPOMetricsCallback, make_env_reward_fn
@@ -102,6 +103,9 @@ TASKS = {
     "opencodeinstruct": {
         "required_columns": ("prompt", "task", "entry"),
     },
+    "openmathreasoning": {
+        "required_columns": ("prompt", "task", "entry"),
+    },
 }
 
 # ---------------------------------------------------------------------------
@@ -111,7 +115,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "TRL GRPO on Reasoning Gym (countdown, knights_knaves, shortest path), "
-            "Math, KodCode, and OpenCodeInstruct"
+            "Math, KodCode, OpenCodeInstruct, and OpenMathReasoning"
         )
     )
     parser.add_argument(
@@ -125,10 +129,11 @@ def parse_args() -> argparse.Namespace:
             "math",
             "kodcode",
             "opencodeinstruct",
+            "openmathreasoning",
         ),
         help=(
             "Task to train on. Choices: countdown, knights_knaves, shortest_path, "
-            "math, kodcode, opencodeinstruct"
+            "math, kodcode, opencodeinstruct, openmathreasoning"
         ),
     )
     parser.add_argument(
@@ -259,12 +264,18 @@ def _has_usable_reference(row: dict) -> bool:
     return answer is not None and bool(answer.strip())
 
 
+def _has_usable_expected_answer(row: dict) -> bool:
+    """Reject OpenMathReasoning rows with a missing/empty expected answer."""
+    answer = row.get("expected_answer")
+    return isinstance(answer, str) and bool(answer.strip())
+
+
 def _normalize_row(row: dict, task: str) -> dict:
     """
     Map one raw row → {prompt, task, entry, ...}.
 
     Builds `prompt` via the task env; `entry` is what metrics/reward pass to
-    load_problem (RG / math / KodCode / OpenCodeInstruct payload).
+    load_problem (RG / math / coding / OpenMathReasoning payload).
     """
     out = dict(row)
     out["task"] = task
@@ -315,6 +326,19 @@ def _normalize_row(row: dict, task: str) -> dict:
         obs = env.load_problem(entry)
         out["entry"] = entry
         out["prompt"] = obs["prompt"]
+    elif task == "openmathreasoning":
+        env = OpenMathReasoningEnv()
+        entry = {
+            "problem": out["problem"],
+            "expected_answer": out["expected_answer"],
+        }
+        if out.get("problem_source") is not None:
+            entry["problem_source"] = out["problem_source"]
+        if out.get("problem_type") is not None:
+            entry["problem_type"] = out["problem_type"]
+        obs = env.load_problem(entry)
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
     else:
         raise ValueError(f"Unknown task: {task}")
 
@@ -351,7 +375,8 @@ def load_train_dataset(source: str, split: str, task: str) -> Dataset:
     Load user data from disk or the HF Hub, then normalize + validate schema.
 
     Raw columns depend on task (RG: question/answer/metadata; math: problem/solution;
-    kodcode: question/test; opencodeinstruct: input/unit_tests).
+    kodcode: question/test; opencodeinstruct: input/unit_tests;
+    openmathreasoning: problem/expected_answer).
     After normalize every row has prompt (plain str), task, and entry for rewards.
     """
     path = Path(source)
@@ -376,6 +401,14 @@ def load_train_dataset(source: str, split: str, task: str) -> Dataset:
         dropped_rows = rows_before_filter - len(dataset)
         if dropped_rows:
             print(f"Dropped {dropped_rows} rows with missing/empty boxed gold answers")
+
+    # OpenMathReasoning: drop rows with missing/empty expected_answer.
+    if task == "openmathreasoning":
+        rows_before_filter = len(dataset)
+        dataset = dataset.filter(_has_usable_expected_answer)
+        dropped_rows = rows_before_filter - len(dataset)
+        if dropped_rows:
+            print(f"Dropped {dropped_rows} rows with missing/empty expected answers")
 
     # --- normalize rows, then fail fast on missing reward columns ---
     dataset = dataset.map(_normalize_row, fn_kwargs={"task": task})
@@ -486,6 +519,8 @@ def make_env_for_task(task: str):
         return KodCodeEnv()
     if task == "opencodeinstruct":
         return OpenCodeInstructEnv()
+    if task == "openmathreasoning":
+        return OpenMathReasoningEnv()
     raise ValueError(f"Unknown task: {task}")
 
 
@@ -525,6 +560,7 @@ def load_model(init_adapter: str | None):
 
     model.print_trainable_parameters()
     return model
+
 
 
 def patch_qwen35_vllm_weight_sync(trainer: GRPOTrainer, model: PeftModel) -> bool:

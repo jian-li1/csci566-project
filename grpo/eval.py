@@ -50,6 +50,7 @@ from grpo.countdown import CountdownEnv
 from grpo.knights_knaves import KnightsKnavesEnv
 from grpo.kodcode import KodCodeEnv
 from grpo.opencodeinstruct import OpenCodeInstructEnv
+from grpo.openmathreasoning import OpenMathReasoningEnv
 from grpo.shortest_path import ShortestPathEnv
 from grpo.math import CompetitionMathEnv, extract_boxed_answer
 from grpo.metrics import FAIL_TYPES, _failure_type
@@ -97,6 +98,9 @@ TASKS = {
     "opencodeinstruct": {
         "required_columns": ("prompt", "task", "entry"),
     },
+    "openmathreasoning": {
+        "required_columns": ("prompt", "task", "entry"),
+    },
 }
 
 
@@ -129,12 +133,18 @@ def _has_usable_reference(row: dict) -> bool:
     return answer is not None and bool(answer.strip())
 
 
+def _has_usable_expected_answer(row: dict) -> bool:
+    """Reject OpenMathReasoning rows with a missing/empty expected answer."""
+    answer = row.get("expected_answer")
+    return isinstance(answer, str) and bool(answer.strip())
+
+
 def _normalize_row(row: dict, task: str) -> dict:
     """
     Map one raw row → {prompt, task, entry, ...}.
 
     Builds `prompt` via the task env; `entry` is what metrics/reward pass to
-    load_problem (RG / math / KodCode / OpenCodeInstruct payload).
+    load_problem (RG / math / coding / OpenMathReasoning payload).
     """
     out = dict(row)
     out["task"] = task
@@ -182,6 +192,19 @@ def _normalize_row(row: dict, task: str) -> dict:
         }
         if out.get("id") is not None:
             entry["id"] = out["id"]
+        obs = env.load_problem(entry)
+        out["entry"] = entry
+        out["prompt"] = obs["prompt"]
+    elif task == "openmathreasoning":
+        env = OpenMathReasoningEnv()
+        entry = {
+            "problem": out["problem"],
+            "expected_answer": out["expected_answer"],
+        }
+        if out.get("problem_source") is not None:
+            entry["problem_source"] = out["problem_source"]
+        if out.get("problem_type") is not None:
+            entry["problem_type"] = out["problem_type"]
         obs = env.load_problem(entry)
         out["entry"] = entry
         out["prompt"] = obs["prompt"]
@@ -254,6 +277,19 @@ def load_examples(source: str, split: str, task: str) -> tuple[Dataset, dict]:
                 "missing/empty boxed gold answers"
             )
 
+    if task == "openmathreasoning":
+        filter_rules.append(
+            "openmathreasoning: drop rows without usable expected_answer"
+        )
+        rows_before_filter = len(dataset)
+        dataset = dataset.filter(_has_usable_expected_answer)
+        n_dropped_invalid_reference = rows_before_filter - len(dataset)
+        if n_dropped_invalid_reference:
+            print(
+                f"Dropped {n_dropped_invalid_reference} rows with "
+                "missing/empty expected answers"
+            )
+
     dataset = dataset.map(_normalize_row, fn_kwargs={"task": task})
     required = TASKS[task]["required_columns"]
     missing = [c for c in required if c not in dataset.column_names]
@@ -311,6 +347,13 @@ def grading_reference_for_row(row: dict, task: str) -> dict:
             "input": entry.get("input"),
             "unit_tests": entry.get("unit_tests"),
         }
+    if task == "openmathreasoning":
+        return {
+            "problem": entry.get("problem"),
+            "expected_answer": entry.get("expected_answer"),
+            "problem_source": entry.get("problem_source"),
+            "problem_type": entry.get("problem_type"),
+        }
     return dict(entry)
 
 
@@ -357,6 +400,8 @@ def make_env_for_task(task: str):
         return KodCodeEnv()
     if task == "opencodeinstruct":
         return OpenCodeInstructEnv()
+    if task == "openmathreasoning":
+        return OpenMathReasoningEnv()
     raise ValueError(f"Unknown task: {task}")
 
 
@@ -452,6 +497,14 @@ def problem_id_for_row(row: dict, task: str) -> str:
             "id": row.get("id"),
             "input": row.get("input"),
             "unit_tests": row.get("unit_tests"),
+        }
+    elif task == "openmathreasoning":
+        payload = {
+            "task": task,
+            "problem": row.get("problem"),
+            "expected_answer": row.get("expected_answer"),
+            "problem_source": row.get("problem_source"),
+            "problem_type": row.get("problem_type"),
         }
     else:
         payload = {
@@ -1068,7 +1121,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Held-out eval for GRPO checkpoints (Reasoning Gym, math, "
-            "KodCode, OpenCodeInstruct)."
+            "KodCode, OpenCodeInstruct, OpenMathReasoning)."
         )
     )
     parser.add_argument(
@@ -1082,10 +1135,11 @@ def parse_args() -> argparse.Namespace:
             "math",
             "kodcode",
             "opencodeinstruct",
+            "openmathreasoning",
         ),
         help=(
             "Task / env to evaluate. Choices: countdown, knights_knaves, "
-            "shortest_path, math, kodcode, opencodeinstruct."
+            "shortest_path, math, kodcode, opencodeinstruct, openmathreasoning."
         ),
     )
     parser.add_argument(
