@@ -216,6 +216,18 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Path to an SFT LoRA adapter to continue from (SFT→GRPO arm).",
     )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        nargs="?",
+        const="auto",
+        default=None,
+        help=(
+            "Resume after a GPU timeout / preemption from a Trainer checkpoint. "
+            "Pass a checkpoint-* dir, or use the flag alone (or 'auto') to pick "
+            "the latest checkpoint under --output-dir. Re-submit with the same "
+            "CLI args as the original run."
+        ),
+    )
     parser.add_argument("--output-dir", type=str, default=None)
     parser.add_argument(
         "--no-vllm",
@@ -562,6 +574,40 @@ def load_model(init_adapter: str | None):
     return model
 
 
+def resolve_resume_checkpoint(
+    output_dir: str | Path, resume: str | None
+) -> str | None:
+    """
+    Resolve --resume-from-checkpoint to a concrete checkpoint path.
+
+    ``auto`` / bare flag → latest ``checkpoint-*`` under ``output_dir``.
+    Explicit path → that directory. ``None`` → start fresh.
+    """
+    if resume is None:
+        return None
+
+    from transformers.trainer_utils import get_last_checkpoint
+
+    if resume.lower() in {"auto", "true", "1", "yes"}:
+        last = get_last_checkpoint(str(output_dir))
+        if last is None:
+            print(
+                f"No Trainer checkpoint found under {output_dir}; "
+                "starting a fresh run."
+            )
+            return None
+        print(f"Resuming from latest checkpoint: {last}")
+        return last
+
+    path = Path(resume)
+    if not path.is_dir():
+        raise ValueError(
+            f"--resume-from-checkpoint path does not exist or is not a directory: "
+            f"{resume}"
+        )
+    print(f"Resuming from checkpoint: {path}")
+    return str(path)
+
 
 def patch_qwen35_vllm_weight_sync(trainer: GRPOTrainer, model: PeftModel) -> bool:
     """
@@ -613,6 +659,10 @@ def main() -> None:
     run_name = f"grpo-{args.task}-G{args.G}-lr{lr_tag}-s{args.seed}"
     output_dir = args.output_dir or f"GRPO/{run_name}"
 
+    resume_checkpoint = resolve_resume_checkpoint(
+        output_dir, args.resume_from_checkpoint
+    )
+
     stop = (
         f"epochs={args.epochs}"
         if args.epochs is not None
@@ -623,7 +673,8 @@ def main() -> None:
         f"prompts/step={prompts_per_step} | {stop} | "
         f"completion_tokens={args.completion_tokens} | "
         f"context_tokens={args.context_tokens} | "
-        f"init_adapter={args.init_adapter!r}"
+        f"init_adapter={args.init_adapter!r} | "
+        f"resume_from_checkpoint={resume_checkpoint!r}"
     )
     print(
         "Batch geometry: "
@@ -710,7 +761,9 @@ def main() -> None:
     if not args.no_vllm and patch_qwen35_vllm_weight_sync(trainer, model):
         print("Enabled Qwen3.5 Hugging Face → vLLM weight-name compatibility mapping.")
 
-    trainer.train()
+    # Restores model / optimizer / scheduler / RNG from checkpoint-* when set
+    # (GPU timeout / Slurm requeue). Keep the same CLI as the interrupted run.
+    trainer.train(resume_from_checkpoint=resume_checkpoint)
     # Final adapter weights (also mid-run saves every save_steps).
     trainer.save_model(output_dir)
 
