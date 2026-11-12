@@ -1,9 +1,0 @@
---extra-index-url https://download.pytorch.org/whl/cu130
-torch
-datasets
-peft
-transformers
-trl[vllm]
-bitsandbytes
-wandb
-math-verify[antrl4_13_2]
