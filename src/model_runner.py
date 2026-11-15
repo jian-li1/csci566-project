@@ -5,6 +5,7 @@ Validation is always required. Full dataset is used by default.
 
 import argparse
 import os
+import re
 from torch.utils.data import Subset
 
 from custom_dataset_loader import custom_dataset_loader
@@ -22,6 +23,8 @@ def describe_filter(stats):
     )
     if "p50" in stats:
         line += f" | tokens p50={stats['p50']} p95={stats['p95']} max={stats['max']}"
+    if stats.get("truncated"):
+        line += f" | answers truncated {stats['truncated']}"
     return line
 
 
@@ -45,12 +48,25 @@ def main():
     parser.add_argument("--tp", type=float, default=0.8)
     parser.add_argument("--vp", type=float, default=0.2)
     parser.add_argument("--model", type=str, default= "llama", help="Model use Llama/Llama-3.2-3B by default")
+    parser.add_argument("--device", choices=["auto", "mps"], default="auto",
+                        help="Model placement; use mps for Apple Silicon training")
+    parser.add_argument("--dtype", choices=["auto", "float16", "bfloat16"], default="auto",
+                        help="Model weight dtype; 16-bit weights reduce Mac memory use")
+    parser.add_argument("--gradient-checkpointing", action="store_true",
+                        help="Recompute activations during backward to save memory")
+    parser.add_argument("--checkpoint-every", type=int, default=50,
+                        help="Save every N optimizer steps; 0 saves only at epoch end")
+    parser.add_argument("--resume-from", default=None,
+                        help="Epoch checkpoint adapter directory; optimizer state starts fresh")
     # Results go to <runs-root>/<dataset-name>/<model>/<run name>/ unless --outdir is given
     parser.add_argument("--outdir", default=None, help="Run folder; default builds one under --runs-root")
     parser.add_argument("--runs-root", default=DEFAULT_RUNS_ROOT, help="Top folder for runs and index.csv")
     parser.add_argument("--dataset-name", default=None, help="Dataset folder name under --runs-root; default is taken from the data path")
     parser.add_argument("--tag", default=None, help="Optional label added to the run name")
-    parser.add_argument("--max-len", type=int, default=4096, help="Max tokens per sample; longer samples are skipped")
+    parser.add_argument("--max-len", type=int, default=4096,
+                        help="Max tokens per sample; longer samples are skipped unless --truncate-long is set")
+    parser.add_argument("--truncate-long", action="store_true",
+                        help="Keep long questions by truncating answer tokens to --max-len")
     parser.add_argument("--log-every", type=int, default=None, help="Print a progress line every N optimizer steps; default is about 20 lines per epoch")
     parser.add_argument("--budget", type=float, default=None,
                         help="Compute budget B in weighted tokens (FLOPs/N); omit to track without stopping")
@@ -68,6 +84,17 @@ def main():
         parser.error("--bsize, --gstep, and --ep must all be positive")
     if args.lr <= 0:
         parser.error("--lr must be positive")
+    if args.checkpoint_every < 0:
+        parser.error("--checkpoint-every must be nonnegative")
+    resume_epoch = resume_step = 0
+    if args.resume_from:
+        args.resume_from = os.path.abspath(os.path.expanduser(args.resume_from))
+        match = re.fullmatch(r"epoch(\d+)_step(\d+)", os.path.basename(args.resume_from))
+        if not match or not os.path.isfile(os.path.join(args.resume_from, "adapter_model.safetensors")):
+            parser.error("--resume-from must point to an epochN_stepN adapter checkpoint")
+        resume_epoch, resume_step = map(int, match.groups())
+        if resume_epoch >= args.ep:
+            parser.error("--ep must be greater than the completed checkpoint epoch")
 
     if args.source == "custom":
         single_file = args.dataset_file is not None
@@ -130,7 +157,15 @@ def main():
         print("WARNING: Debugging subset enabled: not using the full training dataset")
 
     # The tokenizer is needed to measure samples, so build the model first
-    model = TransformerModel(args.model, max_length=args.max_len)
+    model = TransformerModel(
+        args.model,
+        max_length=args.max_len,
+        device=args.device,
+        dtype=args.dtype,
+        gradient_checkpointing=args.gradient_checkpointing,
+        truncate_long=args.truncate_long,
+        resume_from=args.resume_from,
+    )
 
     # Skip samples longer than --max-len once, before training starts
     if dataset is not None:
@@ -172,6 +207,9 @@ def main():
         targets = ",".join(sorted(targets))
     summary.set_section("Model", {
         "Model": f"{model.model_name} ({model.model_id})",
+        "Device": args.device,
+        "Dtype": args.dtype,
+        "Gradient checkpointing": args.gradient_checkpointing,
         "LoRA": (
             f"r={lora.r}, alpha={lora.lora_alpha}, dropout={lora.lora_dropout}, "
             f"targets={targets}"
@@ -181,6 +219,14 @@ def main():
             f"({100 * model.trainable_params / model.total_params:.2f}%)"
         ),
     })
+    if args.resume_from:
+        summary.set_section("Resume", {
+            "Adapter checkpoint": args.resume_from,
+            "Completed epochs": resume_epoch,
+            "Completed optimizer steps": resume_step,
+            "Optimizer state": "reset (previous training_state.pt not used)",
+        })
+        summary.prior_epochs = resume_epoch
 
     data = {"Source": args.source}
     if args.source == "hf":
@@ -194,6 +240,7 @@ def main():
         data["Split"] = f"automatic {args.tp:g}/{args.vp:g} (seed 42)"
     data["Samples cap"] = f"{args.samples} (debug subset)" if args.samples else "none (full dataset)"
     data["Max length"] = f"{args.max_len} tokens"
+    data["Truncate long answers"] = args.truncate_long
     for name, stats in model.filter_stats.items():
         data[name.capitalize()] = describe_filter(stats)
     summary.set_section("Data", data)
@@ -212,6 +259,9 @@ def main():
         output_dir=args.outdir,
         summary=summary,
         log_every=args.log_every,
+        checkpoint_every=args.checkpoint_every,
+        start_epoch=resume_epoch,
+        start_step=resume_step,
         budget=args.budget,
         budget_stage=args.budget_stage,
     )

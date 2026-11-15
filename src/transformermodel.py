@@ -1,12 +1,22 @@
 from transformers import AutoProcessor, AutoModelForMultimodalLM, AutoModelForCausalLM, AutoTokenizer
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 import torch
 from torch.utils.data import Subset
 
 class TransformerModel:
-    def __init__ (self, model_name:str, max_length:int = 4096):
+    def __init__(
+        self,
+        model_name: str,
+        max_length: int = 4096,
+        device: str = "auto",
+        dtype: str = "auto",
+        gradient_checkpointing: bool = False,
+        truncate_long: bool = False,
+        resume_from: str = None,
+    ):
         self.model_name = model_name.lower()
         self.max_length = max_length
+        self.truncate_long = truncate_long
         # Per-split results of filter_dataset, read by the run summary
         self.filter_stats = {}
         if self.model_name == "llama":
@@ -30,26 +40,37 @@ class TransformerModel:
 
         self.tokenizer.padding_side = "right"
 
-        # Load Model
+        if device == "mps" and not torch.backends.mps.is_available():
+            raise RuntimeError("MPS is unavailable; this script requires an Apple Silicon Mac with PyTorch MPS support")
+        model_dtype = {"auto": "auto", "float16": torch.float16, "bfloat16": torch.bfloat16}[dtype]
+
+        # An explicit MPS device keeps the entire model on Apple GPU memory.
         self.model = model_loader.from_pretrained(
             model_id,
-            dtype="auto",
-            device_map="auto",
+            dtype=model_dtype,
+            device_map=device,
         )
 
+        if gradient_checkpointing:
+            self.model.config.use_cache = False
+            self.model.gradient_checkpointing_enable(
+                gradient_checkpointing_kwargs={"use_reentrant": False}
+            )
+
         self.lora_config = LoraConfig(
-            r=8,
-            lora_alpha=16,
+            r=16,
+            lora_alpha=32,
             lora_dropout=0.05,
             target_modules="all-linear",
             bias="none",
             task_type="CAUSAL_LM",
         )
 
-        self.model = get_peft_model(
-            self.model,
-            self.lora_config
-        )
+        if resume_from:
+            self.model = PeftModel.from_pretrained(self.model, resume_from, is_trainable=True)
+            self.lora_config = self.model.peft_config["default"]
+        else:
+            self.model = get_peft_model(self.model, self.lora_config)
 
         self.model.print_trainable_parameters()
         self.trainable_params, self.total_params = self.model.get_nb_trainable_parameters()
@@ -125,10 +146,11 @@ class TransformerModel:
         return prompt_ids + completion_ids, len(prompt_ids)
 
     def filter_dataset(self, dataset, name="dataset"):
-        """One pass before training: skip samples that are too long or have
-        an empty answer, and report how many were skipped."""
+        """One pass before training: discard unusable samples and report
+        lengths. Optionally keep long answers for token-level truncation."""
         keep = []
         too_long = 0
+        truncated = 0
         empty = 0
         lengths = []
 
@@ -142,22 +164,28 @@ class TransformerModel:
                 empty += 1
                 continue
 
-            full_ids, _ = self.tokenize_example(
+            full_ids, prompt_length = self.tokenize_example(
                 ex["question"], answer, ex.get("system", "")
             )
             lengths.append(len(full_ids))
 
-            if len(full_ids) > self.max_length:
+            if len(full_ids) <= prompt_length or prompt_length >= self.max_length:
+                too_long += 1
+            elif len(full_ids) > self.max_length and not self.truncate_long:
                 too_long += 1
             else:
+                if len(full_ids) > self.max_length:
+                    truncated += 1
                 keep.append(idx)
 
         print(
             f"[{name}] kept {len(keep)}/{len(dataset)} | "
             f"skipped too long (>{self.max_length} tokens): {too_long} | "
+            f"answers truncated: {truncated} | "
             f"skipped empty answer: {empty}"
         )
-        stats = {"kept": len(keep), "total": len(dataset), "too_long": too_long, "empty": empty}
+        stats = {"kept": len(keep), "total": len(dataset), "too_long": too_long,
+                 "truncated": truncated, "empty": empty}
         if lengths:
             s = sorted(lengths)
             stats.update(p50=s[len(s) // 2], p95=s[int(len(s) * 0.95)], max=s[-1])
@@ -190,13 +218,19 @@ class TransformerModel:
                 question, answer, system
             )
 
-            # Safety net only: filter_dataset already removed these
-            if len(full_ids) > self.max_length or len(full_ids) <= prompt_length:
+            # Safety net only: filter_dataset already removed unusable rows.
+            if len(full_ids) <= prompt_length or prompt_length >= self.max_length or (
+                len(full_ids) > self.max_length and not self.truncate_long
+            ):
                 raise RuntimeError(
                     f"Sample {i} slipped past filter_dataset "
                     f"(len={len(full_ids)}, prompt={prompt_length}, "
                     f"max={self.max_length})"
                 )
+
+            if self.truncate_long:
+                # Keep the full question and the first part of its answer.
+                full_ids = full_ids[:self.max_length]
 
             full_token_lists.append(full_ids)
             prompt_lengths.append(prompt_length)

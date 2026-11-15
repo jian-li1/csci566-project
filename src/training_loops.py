@@ -31,6 +31,9 @@ class TrainingLoops:
         valset=None,
         summary=None,
         log_every=None,
+        checkpoint_every=50,
+        start_epoch=0,
+        start_step=0,
         budget=None,
         budget_stage=None,
     ):
@@ -40,6 +43,8 @@ class TrainingLoops:
         self.lr = lr
         self.gradient_accumulation_steps = gradient_accumulation_steps
         self.output_dir = output_dir
+        self.checkpoint_every = checkpoint_every
+        self.start_epoch = start_epoch
         os.makedirs(self.output_dir, exist_ok=True)
 
         # Exactly one source: either a whole dataset to split, or a train/val pair.
@@ -93,7 +98,18 @@ class TrainingLoops:
             num_warmup_steps=warmup_steps,
             num_training_steps=total_updates,
         )
-        self.global_step = 0
+        if start_epoch and start_step != start_epoch * updates_per_epoch:
+            raise ValueError("Resume checkpoint step does not match the current dataset and accumulation settings")
+        self.global_step = start_step
+        if start_step:
+            # Keep the original three-epoch LR schedule; optimizer moments are unavailable.
+            resumed_lrs = [base * schedule(start_step) for base, schedule in
+                           zip(self.scheduler.base_lrs, self.scheduler.lr_lambdas)]
+            for group, resumed_lr in zip(self.optimizer.param_groups, resumed_lrs):
+                group["lr"] = resumed_lr
+            self.scheduler.last_epoch = start_step
+            self.scheduler._step_count = start_step + 1
+            self.scheduler._last_lr = resumed_lrs
         self.total_updates = total_updates
         self._last_saved_step = -1
         self._last_checkpoint_dir = None
@@ -118,6 +134,9 @@ class TrainingLoops:
             "Total optimizer updates": total_updates,
             "Warmup steps": warmup_steps,
             "Log every": f"{self.log_every} optimizer steps",
+            "Checkpoint every": f"{self.checkpoint_every} steps" if self.checkpoint_every else "epoch end",
+            "Starting epoch": self.start_epoch + 1,
+            "Starting optimizer step": self.global_step,
         }
         print("\n===== Training Configuration =====")
         for label, value in config.items():
@@ -173,7 +192,7 @@ class TrainingLoops:
         self.summary.finish("completed")
 
     def _train(self):
-        for epoch in range(self.epochs):
+        for epoch in range(self.start_epoch, self.epochs):
             print(f"\n{'=' * 50}\nStarting Epoch {epoch + 1}/{self.epochs}\n{'=' * 50}")
             epoch_start = time.time()
             self.model.model.train()
@@ -240,7 +259,7 @@ class TrainingLoops:
                         log_loss = 0.0
                         log_updates = 0
 
-                    if self.global_step % 50 == 0:
+                    if self.checkpoint_every and self.global_step % self.checkpoint_every == 0:
                         self.save_checkpoint(epoch)
 
                     if self._budget_reached:

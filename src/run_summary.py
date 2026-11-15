@@ -80,6 +80,7 @@ class RunSummary:
         }
         self.total_epochs = None
         self.epochs = []
+        self.prior_epochs = 0
         self.best = None
         self.status = "starting"
 
@@ -144,7 +145,7 @@ class RunSummary:
         row = {
             "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "run": os.path.basename(os.path.normpath(self.output_dir)),
-            "epochs_done": f"{len(self.epochs)}/{self.total_epochs}",
+            "epochs_done": f"{self.prior_epochs + len(self.epochs)}/{self.total_epochs}",
             "best_epoch": self.best["epoch"] if self.best else "",
             "best_val_loss": f"{self.best['val_loss']:.4f}" if self.best else "",
             "final_val_loss": f"{last['val_loss']:.4f}" if last else "",
