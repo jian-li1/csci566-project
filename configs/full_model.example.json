@@ -1,0 +1,33 @@
+{
+  "output_dir": "outputs",
+  "generation": {
+    "max_new_tokens": 4096,
+    "seed": 42
+  },
+  "grader": {
+    "runtime": "docker",
+    "image": "project-eval-grader:1",
+    "timeout_seconds": 20
+  },
+  "runs": [
+    {
+      "name": "llama_kodcode_grpo_merged",
+      "task": "kodcode",
+      "checkpoint": {
+        "type": "full",
+        "path": "checkpoints/llama_grpo_merged",
+        "loader": "auto_causal"
+      },
+      "prompt": {
+        "format": "chat",
+        "include_signatures": true,
+        "chat_template_kwargs": {
+          "date_string": "26 Jul 2024"
+        }
+      },
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "offline": false
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "kodcode": {
+    "path": "data/kodcode/test.jsonl",
+    "rows": 250,
+    "sha256": "c91af99b1fd401af0f2f1ec4a0f3aeba0449f67ea671bc6bc2d9453b29b8918b",
+    "source_archive": "kodcode-base-carc.zip",
+    "source_member": "data/test.jsonl"
+  },
+  "opencode": {
+    "path": "data/opencode/test.jsonl",
+    "rows": 250,
+    "sha256": "c35b0a7f45c70e43c935954b1b7e8ae87e0ed4b47fd0c013c2d299cf2c3f6834",
+    "source_archive": "opencode-instruct-carc.zip",
+    "source_member": "opencode-instruct-carc/data/test.jsonl"
+  },
+  "shortest_path": {
+    "path": "data/shortest_path/test.jsonl",
+    "rows": 250,
+    "sha256": "0949d79011e524613c5e3cdeb52cef17fcbea14a8fdbe393c33c4384997e65d9",
+    "source_archive": "shortest-path-instruct-carc.zip",
+    "source_member": "shortest-path-instruct-carc/data/test.jsonl"
+  },
+  "competition_math": {
+    "path": "data/competition_math/test.jsonl",
+    "rows": 250,
+    "sha256": "b0c48da13bc060088ffec6cc07eff80f69113e6d486130f0d027b28e87e71549",
+    "source_archive": "qwen-comp-math-final-carc.zip",
+    "source_member": "qwen-comp-math-final/data/competition_math/test.jsonl",
+    "note": "First 250 original test rows; exact bytes match the 250-question frozen experiment SHA-256 recorded in the later run_config.json. No new sampling."
+  }
+}

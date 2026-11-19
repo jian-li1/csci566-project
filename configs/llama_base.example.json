@@ -1,0 +1,34 @@
+{
+  "output_dir": "outputs",
+  "generation": {
+    "max_new_tokens": 4096,
+    "seed": 42
+  },
+  "grader": {
+    "runtime": "docker",
+    "image": "project-eval-grader:1",
+    "timeout_seconds": 20
+  },
+  "runs": [
+    {
+      "name": "llama_kodcode_base_sft",
+      "task": "kodcode",
+      "checkpoint": {
+        "type": "adapter",
+        "path": "checkpoints/llama_kodcode_base_sft",
+        "base_model": "meta-llama/Llama-3.2-3B",
+        "base_revision": "13afe5124825b4f3751f836b40dafda64c1ed062",
+        "loader": "auto_causal"
+      },
+      "prompt": {
+        "format": "base",
+        "base_template": "### Instruction:\n{question}\n\nReturn a complete Python solution in a single fenced code block.\n\n### Response:\n",
+        "add_bos": true,
+        "include_signatures": false
+      },
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "offline": false
+    }
+  ]
+}

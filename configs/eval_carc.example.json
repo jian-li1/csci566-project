@@ -1,0 +1,35 @@
+{
+  "output_dir": "outputs",
+  "generation": {
+    "max_new_tokens": 4096,
+    "seed": 42
+  },
+  "grader": {
+    "runtime": "apptainer",
+    "image": "grader/grader.sif",
+    "timeout_seconds": 20
+  },
+  "runs": [
+    {
+      "name": "qwen_kodcode_sft",
+      "task": "kodcode",
+      "checkpoint": {
+        "type": "adapter",
+        "path": "checkpoints/qwen_kodcode_sft",
+        "base_model": "Qwen/Qwen3.5-4B",
+        "base_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        "loader": "qwen3_5_full"
+      },
+      "prompt": {
+        "format": "chat",
+        "include_signatures": true,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "offline": false
+    }
+  ]
+}

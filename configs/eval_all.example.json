@@ -1,0 +1,95 @@
+{
+  "output_dir": "outputs",
+  "generation": {
+    "max_new_tokens": 4096,
+    "seed": 42
+  },
+  "grader": {
+    "runtime": "docker",
+    "image": "project-eval-grader:1",
+    "timeout_seconds": 20
+  },
+  "runs": [
+    {
+      "name": "qwen_kodcode_sft",
+      "task": "kodcode",
+      "checkpoint": {
+        "type": "adapter",
+        "path": "checkpoints/qwen_kodcode_sft",
+        "base_model": "Qwen/Qwen3.5-4B",
+        "base_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        "loader": "qwen3_5_full"
+      },
+      "prompt": {
+        "format": "chat",
+        "include_signatures": true,
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "offline": false
+    },
+    {
+      "name": "qwen_opencode_sft",
+      "task": "opencode",
+      "checkpoint": {
+        "type": "adapter",
+        "path": "checkpoints/qwen_opencode_sft",
+        "base_model": "Qwen/Qwen3.5-4B",
+        "base_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        "loader": "qwen3_5_full"
+      },
+      "prompt": {
+        "format": "chat",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "offline": false
+    },
+    {
+      "name": "qwen_competition_math_sft",
+      "task": "competition_math",
+      "checkpoint": {
+        "type": "adapter",
+        "path": "checkpoints/qwen_competition_math_sft",
+        "base_model": "Qwen/Qwen3.5-4B",
+        "base_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        "loader": "qwen3_5_text"
+      },
+      "prompt": {
+        "format": "chat",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "offline": false
+    },
+    {
+      "name": "qwen_shortest_path_sft",
+      "task": "shortest_path",
+      "checkpoint": {
+        "type": "adapter",
+        "path": "checkpoints/qwen_shortest_path_sft",
+        "base_model": "Qwen/Qwen3.5-4B",
+        "base_revision": "851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a",
+        "loader": "qwen3_5_full"
+      },
+      "prompt": {
+        "format": "chat",
+        "chat_template_kwargs": {
+          "enable_thinking": false
+        }
+      },
+      "device": "cuda",
+      "dtype": "bfloat16",
+      "offline": false
+    }
+  ]
+}
