@@ -20,11 +20,11 @@ class TransformerModel:
         # Per-split results of filter_dataset, read by the run summary
         self.filter_stats = {}
         if self.model_name == "llama":
-            model_id = "meta-llama/Llama-3.2-3B-Instruct"
+            model_id = "meta-llama/Llama-3.2-3B"
             model_loader = AutoModelForCausalLM
 
         elif self.model_name == "qwen":
-            model_id = "Qwen/Qwen3.5-4B"
+            model_id = "Qwen/Qwen3.5-4B-Base"
             model_loader = AutoModelForMultimodalLM
 
         else:
