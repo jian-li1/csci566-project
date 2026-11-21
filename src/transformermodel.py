@@ -2,6 +2,7 @@ from transformers import AutoProcessor, AutoModelForMultimodalLM, AutoModelForCa
 from peft import LoraConfig, PeftModel, get_peft_model
 import torch
 from torch.utils.data import Subset
+from chat_templates import configure_chat_template
 
 class TransformerModel:
     def __init__(
@@ -34,6 +35,7 @@ class TransformerModel:
 
         # Tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+        added_chat_template = configure_chat_template(self.tokenizer, self.model_name)
 
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -50,6 +52,9 @@ class TransformerModel:
             dtype=model_dtype,
             device_map=device,
         )
+        if added_chat_template:
+            self.model.generation_config.eos_token_id = self.tokenizer.eos_token_id
+            self.model.generation_config.pad_token_id = self.tokenizer.pad_token_id
 
         if gradient_checkpointing:
             self.model.config.use_cache = False
